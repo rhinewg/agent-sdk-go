@@ -9,8 +9,8 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
-import { Users, Search, Send, Bot, Wrench, CheckCircle, AlertCircle, RefreshCw, Plus } from 'lucide-react';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Users, Search, Send, Bot, Wrench, CheckCircle, AlertCircle, RefreshCw } from 'lucide-react';
 
 export function SubAgentsScreen() {
   const [subAgents, setSubAgents] = useState<SubAgentInfo[]>([]);

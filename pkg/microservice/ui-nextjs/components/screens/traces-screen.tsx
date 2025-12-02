@@ -1,15 +1,13 @@
 'use client';
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { UITrace, TracesResponse, TraceStats } from '@/types/agent';
+import { UITrace, TraceStats } from '@/types/agent';
 import { agentAPI } from '@/lib/api';
 import { TraceDetailViewer } from '../traces/trace-detail-viewer';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
-import { ScrollArea } from '@/components/ui/scroll-area';
-// Using native select for simplicity
 import {
   Table,
   TableBody,
@@ -27,7 +25,6 @@ import {
   Eye,
   RefreshCw,
   Search,
-  Filter,
 } from 'lucide-react';
 
 export function TracesScreen() {
@@ -284,7 +281,7 @@ export function TracesScreen() {
               <select
                 className="flex h-10 w-full items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-sm"
                 value={sortBy}
-                onChange={(e) => setSortBy(e.target.value as any)}
+                onChange={(e) => setSortBy(e.target.value as 'start_time' | 'duration_ms' | 'name')}
               >
                 <option value="start_time">Start Time</option>
                 <option value="duration_ms">Duration</option>

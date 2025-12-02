@@ -17,23 +17,29 @@ export function AgentInfoScreen({ agentConfig }: AgentInfoScreenProps) {
   const [healthStatus, setHealthStatus] = useState<'checking' | 'healthy' | 'error'>('checking');
   const [lastHealthCheck, setLastHealthCheck] = useState<Date | null>(null);
 
-  useEffect(() => {
-    checkHealth();
-    const interval = setInterval(checkHealth, 30000);
-    return () => clearInterval(interval);
-  }, []);
-
   const checkHealth = async () => {
     try {
       setHealthStatus('checking');
       await agentAPI.health();
       setHealthStatus('healthy');
       setLastHealthCheck(new Date());
-    } catch (error) {
+    } catch {
       setHealthStatus('error');
       setLastHealthCheck(new Date());
     }
   };
+
+  useEffect(() => {
+    // Use setTimeout to avoid synchronous setState in effect
+    const timeoutId = setTimeout(() => {
+      checkHealth();
+    }, 0);
+    const interval = setInterval(checkHealth, 30000);
+    return () => {
+      clearTimeout(timeoutId);
+      clearInterval(interval);
+    };
+  }, []);
 
   const getHealthStatusIcon = () => {
     switch (healthStatus) {

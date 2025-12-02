@@ -15,7 +15,6 @@ interface ConversationDetailProps {
   offset: number;
   loading: boolean;
   onBack: () => void;
-  onLoadMore?: () => void;
   onPrevPage?: () => void;
   onNextPage?: () => void;
 }
@@ -28,7 +27,6 @@ export function ConversationDetail({
   offset,
   loading,
   onBack,
-  onLoadMore,
   onPrevPage,
   onNextPage
 }: ConversationDetailProps) {

@@ -20,6 +20,17 @@ export function SettingsScreen({ agentConfig }: SettingsScreenProps) {
   const isThemeSwitchDisabled = agentConfig?.ui_theme === 'system';
 
   useEffect(() => {
+    // When following system theme, sync local state from current DOM class
+    if (agentConfig?.ui_theme === 'system') {
+      // Use setTimeout to avoid synchronous setState in effect
+      setTimeout(() => {
+        const isDarkMode = document.documentElement.classList.contains('dark');
+        setTheme(isDarkMode ? 'dark' : 'light');
+      }, 0);
+    }
+  }, [agentConfig?.ui_theme]);
+
+  useEffect(() => {
     // Only handle manual theme changes when not in system mode
     if (agentConfig?.ui_theme !== 'system') {
       if (theme === 'dark') {
@@ -28,10 +39,6 @@ export function SettingsScreen({ agentConfig }: SettingsScreenProps) {
         document.documentElement.classList.remove('dark');
       }
     }
-
-    // Update local state to reflect current theme (for display purposes)
-    const isDarkMode = document.documentElement.classList.contains('dark');
-    setTheme(isDarkMode ? 'dark' : 'light');
   }, [theme, agentConfig?.ui_theme]);
 
   return (

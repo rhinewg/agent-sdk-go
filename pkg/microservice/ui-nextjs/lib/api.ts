@@ -4,7 +4,6 @@ import {
   Tool,
   MemoryEntry,
   MemoryResponse,
-  ConversationInfo,
   RunRequest,
   StreamRequest,
   RunResponse,

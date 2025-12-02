@@ -41,8 +41,9 @@ export function MemoryBrowser({ open, onOpenChange }: MemoryBrowserProps) {
       if (response.mode === 'messages' && response.messages) {
         setEntries(response.messages);
       } else if ('entries' in response) {
-        // Fallback for old format
-        setEntries((response as any).entries || []);
+        // Fallback for old format where response.entries was used
+        const legacyResponse = response as typeof response & { entries?: MemoryEntry[] };
+        setEntries(legacyResponse.entries || []);
       }
       setPagination(prev => ({
         ...prev,
@@ -97,8 +98,9 @@ export function MemoryBrowser({ open, onOpenChange }: MemoryBrowserProps) {
       if (response.mode === 'messages' && response.messages) {
         newEntries = response.messages;
       } else if ('entries' in response) {
-        // Fallback for old format
-        newEntries = (response as any).entries || [];
+        // Fallback for old format where response.entries was used
+        const legacyResponse = response as typeof response & { entries?: MemoryEntry[] };
+        newEntries = legacyResponse.entries || [];
       }
       setEntries(prev => [...prev, ...newEntries]);
       setPagination(prev => ({

@@ -1,9 +1,9 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { agentAPI } from '@/lib/api';
-import { MemoryEntry, MemoryResponse, ConversationInfo } from '@/types/agent';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { MemoryEntry, ConversationInfo } from '@/types/agent';
+import { Card, CardContent, CardHeader } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Input } from '@/components/ui/input';
@@ -32,31 +32,7 @@ export function MemoryScreen() {
     loadConversations();
   }, []);
 
-  // Load messages when conversation is selected
-  useEffect(() => {
-    if (selectedConversationId) {
-      loadMessages();
-    }
-  }, [selectedConversationId, messagesOffset]);
-
-  const loadConversations = async () => {
-    try {
-      setConversationsLoading(true);
-      setError(null);
-      const response = await agentAPI.getMemory(100, 0);
-      if (response.mode === 'conversations' && response.conversations) {
-        setConversations(response.conversations);
-      } else {
-        setConversations([]);
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load conversations');
-    } finally {
-      setConversationsLoading(false);
-    }
-  };
-
-  const loadMessages = async () => {
+  const loadMessages = useCallback(async () => {
     if (!selectedConversationId) return;
 
     try {
@@ -75,6 +51,30 @@ export function MemoryScreen() {
       setError(err instanceof Error ? err.message : 'Failed to load messages');
     } finally {
       setMessagesLoading(false);
+    }
+  }, [selectedConversationId, messagesLimit, messagesOffset]);
+
+  // Load messages when conversation is selected
+  useEffect(() => {
+    if (selectedConversationId) {
+      loadMessages();
+    }
+  }, [selectedConversationId, messagesOffset, loadMessages]);
+
+  const loadConversations = async () => {
+    try {
+      setConversationsLoading(true);
+      setError(null);
+      const response = await agentAPI.getMemory(100, 0);
+      if (response.mode === 'conversations' && response.conversations) {
+        setConversations(response.conversations);
+      } else {
+        setConversations([]);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load conversations');
+    } finally {
+      setConversationsLoading(false);
     }
   };
 

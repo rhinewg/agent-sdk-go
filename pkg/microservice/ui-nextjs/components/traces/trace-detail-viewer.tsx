@@ -16,7 +16,6 @@ import {
   ChevronRight,
   X,
   Code,
-  ArrowRight,
   Zap,
   MessageCircle,
 } from 'lucide-react';
