@@ -212,6 +212,30 @@ myAgent, err := agent.NewAgent(
 response, err := myAgent.Run(ctx, "Create a new file called hello.txt with content 'Hello World'")
 ```
 
+### Comparison: MCP vs Native Tools
+
+**Native Tool Approach** (e.g., GitHub Extractor):
+```go
+// Requires manual tool creation and registration
+githubTool, err := github.NewGitHubContentExtractorTool(token)
+toolRegistry.Register(githubTool)
+agent, err := agent.NewAgent(
+    agent.WithTools(toolRegistry.List()...),
+)
+```
+
+**MCP Approach**:
+```go
+// Zero-code configuration, automatic tool discovery
+agent, err := agent.NewAgent(
+    agent.WithMCPPresets("github"),
+)
+```
+
+**When to use each:**
+- **Native Tools**: Custom business logic, deep integration, project-specific functionality
+- **MCP**: Standardized services, quick integration, configuration-driven, multi-environment support
+
 ### 2. Database Queries
 
 ```go
