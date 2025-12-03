@@ -123,27 +123,82 @@ agent, err := agent.NewAgent(
 ### 1. URL 格式说明
 
 #### Stdio 服务器
+
+**为什么叫 "Stdio"？**
+
+"Stdio" 是 **Standard Input/Output**（标准输入输出）的缩写。这种类型的服务器通过进程的标准输入（stdin）和标准输出（stdout）与 MCP 客户端进行通信。
+
+**工作原理：**
+1. MCP 客户端启动一个子进程（MCP 服务器程序）
+2. 客户端通过 **stdin**（标准输入）向服务器发送 JSON-RPC 请求
+3. 服务器通过 **stdout**（标准输出）返回 JSON-RPC 响应
+4. 这是一种**进程间通信（IPC）**方式，不需要网络连接
+
+**格式：**
 ```
 stdio://server-name/path/to/executable?arg1=value1&arg2=value2
 ```
 
-示例：
+**示例：**
 ```go
 "stdio://filesystem/usr/local/bin/mcp-filesystem"
 "stdio://filesystem/usr/local/bin/mcp-filesystem?root=/home/user"
 ```
 
+**适用场景：**
+- ✅ 本地运行的 MCP 服务器
+- ✅ 不需要网络连接
+- ✅ 进程间直接通信，性能更好
+- ✅ 安全性更高（不暴露网络端口）
+
+**实现细节：**
+```go
+// 代码中实际是这样工作的：
+cmd := exec.CommandContext(ctx, "/usr/local/bin/mcp-filesystem")
+stdin, _ := cmd.StdinPipe()   // 获取标准输入管道
+stdout, _ := cmd.StdoutPipe() // 获取标准输出管道
+
+// 通过 stdin 发送请求
+stdin.Write(jsonRequest)
+
+// 从 stdout 读取响应
+response := readFromStdout()
+```
+
 #### HTTP 服务器
+
+**工作原理：**
+- 通过 HTTP/HTTPS 协议进行网络通信
+- 客户端发送 HTTP 请求到远程服务器
+- 服务器返回 HTTP 响应
+
+**格式：**
 ```
 http://host:port/path
 https://host:port/path?token=your-token
 ```
 
-示例：
+**示例：**
 ```go
 "http://localhost:8080/mcp"
 "https://api.example.com/mcp?token=abc123"
 ```
+
+**适用场景：**
+- ✅ 远程 MCP 服务器
+- ✅ 跨网络访问
+- ✅ 需要负载均衡和高可用
+- ✅ 微服务架构
+
+**与 Stdio 的对比：**
+
+| 特性 | Stdio 服务器 | HTTP 服务器 |
+|------|-------------|------------|
+| **通信方式** | 进程间通信（stdin/stdout） | 网络通信（HTTP） |
+| **部署位置** | 本地进程 | 本地或远程 |
+| **性能** | 更快（无网络开销） | 较慢（网络延迟） |
+| **安全性** | 高（无网络暴露） | 需要 TLS/认证 |
+| **适用场景** | 本地工具、CLI 程序 | 远程服务、微服务 |
 
 #### 预设服务器
 ```
