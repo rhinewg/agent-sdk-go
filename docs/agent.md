@@ -397,6 +397,88 @@ if err != nil {
 fmt.Println(response)
 ```
 
+## Concurrency and Thread Safety
+
+### Goroutine Safety
+
+**Agent 是协程安全的（Goroutine-Safe）**，可以在多个 goroutine 中并发调用 `Run` 方法：
+
+```go
+// ✅ 安全：多个 goroutine 可以同时使用同一个 Agent 实例
+var wg sync.WaitGroup
+for i := 0; i < 10; i++ {
+    wg.Add(1)
+    go func(id int) {
+        defer wg.Done()
+        response, err := agent.Run(ctx, fmt.Sprintf("Query %d", id))
+        if err != nil {
+            log.Printf("Error: %v", err)
+            return
+        }
+        fmt.Printf("Response %d: %s\n", id, response)
+    }(i)
+}
+wg.Wait()
+```
+
+### 并发安全保证
+
+1. **Agent 结构体字段**：
+   - Agent 的配置字段（如 `llm`, `memory`, `tools`）在创建后是**只读的**
+   - 每次 `Run` 调用使用局部变量，不会修改 Agent 的共享状态
+
+2. **Memory 实现**：
+   - `ConversationBuffer` 使用 `sync.RWMutex` 保护并发访问
+   - `VectorStoreRetriever` 和 `ConversationSummary` 也都有 mutex 保护
+   - `RedisMemory` 使用 Redis 客户端，Redis 本身是并发安全的
+   - **每个对话通过 `conversationID` 隔离**，不同对话之间不会相互干扰
+
+3. **工具执行**：
+   - 工具调用是独立的，每次 `Run` 调用创建自己的工具列表副本
+   - MCP 工具在运行时动态收集，使用局部变量，不修改 Agent 状态
+
+### 注意事项
+
+1. **共享 Memory 实例**：
+   ```go
+   // ✅ 安全：同一个 Memory 实例可以在多个 Agent 间共享
+   sharedMemory := memory.NewConversationBuffer()
+   
+   agent1, _ := agent.NewAgent(
+       agent.WithLLM(llm1),
+       agent.WithMemory(sharedMemory), // 共享 Memory
+   )
+   
+   agent2, _ := agent.NewAgent(
+       agent.WithLLM(llm2),
+       agent.WithMemory(sharedMemory), // 共享 Memory
+   )
+   
+   // 两个 Agent 可以并发运行，Memory 会正确处理并发访问
+   ```
+
+2. **Context 隔离**：
+   ```go
+   // ✅ 正确：每个请求使用独立的 context 和 conversationID
+   ctx1 := context.WithValue(ctx, memory.ConversationIDKey, "conv-1")
+   ctx2 := context.WithValue(ctx, memory.ConversationIDKey, "conv-2")
+   
+   go agent.Run(ctx1, "Query 1")
+   go agent.Run(ctx2, "Query 2")
+   ```
+
+3. **避免在运行时修改 Agent**：
+   ```go
+   // ❌ 不安全：不要在运行时修改 Agent 的配置
+   // Agent 的配置字段应该在创建时设置，之后保持不变
+   ```
+
+### 性能考虑
+
+- **单 Agent 多请求**：适合高并发场景，Agent 实例可以安全地处理多个并发请求
+- **Memory 隔离**：通过 `conversationID` 实现对话隔离，不同对话互不影响
+- **无锁读取**：Agent 的配置字段是只读的，读取操作无需加锁
+
 ## Streaming Responses
 
 To stream the agent's response:
