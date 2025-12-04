@@ -1669,7 +1669,8 @@ func createLLM(config *CLIConfig) interfaces.LLM {
 			log.Fatal("OPENAI_API_KEY environment variable is required for OpenAI provider")
 		}
 		return openai.NewClient(apiKey,
-			openai.WithModel(config.Model))
+			openai.WithModel(os.Getenv("OPENAI_MODEL")),
+			openai.WithBaseURL(os.Getenv("OPENAI_BASE_URL")))
 
 	case "anthropic":
 		apiKey := os.Getenv("ANTHROPIC_API_KEY")
