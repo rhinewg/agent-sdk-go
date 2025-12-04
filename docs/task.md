@@ -2,6 +2,8 @@
 
 The task execution package provides functionality for executing tasks synchronously and asynchronously, including API calls and Temporal workflows.
 
+> 📖 **完整教程**: 查看 [Task 与 Workflow 使用教程](./task-workflow-guide.md) 获取更详细的使用说明和最佳实践。
+
 ## Features
 
 - Execute tasks synchronously and asynchronously
