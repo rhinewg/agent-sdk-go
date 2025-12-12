@@ -29,6 +29,7 @@ type LazyMCPConfig struct {
 	Args    []string
 	Env     []string
 	URL     string
+	Token   string // Bearer token for HTTP authentication
 	Tools   []LazyMCPToolConfig
 }
 
@@ -1020,6 +1021,7 @@ func (a *Agent) createLazyMCPTools() []interfaces.Tool {
 			Args:    config.Args,
 			Env:     config.Env,
 			URL:     config.URL,
+			Token:   config.Token,
 		}
 
 		// If no specific tools are defined, discover all tools from the server
@@ -1673,8 +1675,18 @@ func (a *Agent) configureSubAgentTools() {
 // initializeRemoteAgent initializes the remote agent connection and fetches metadata
 func (a *Agent) initializeRemoteAgent() error {
 	// Connect to the remote agent
+	// NOTE: Connection failures are non-fatal during initialization
+	// This allows agents to be created even if the remote service is temporarily unavailable
+	// The SDK will automatically retry connection on first actual use
 	if err := a.remoteClient.Connect(); err != nil {
-		return fmt.Errorf("failed to connect to remote agent: %w", err)
+		// Log warning but don't fail initialization - connection will be retried on first use
+		fmt.Printf("Warning: failed to connect to remote agent %s during initialization: %v (will retry on first use)\n", a.remoteURL, err)
+		// Return early - skip metadata fetch since connection is not available yet
+		// Set default name if not provided
+		if a.name == "" {
+			a.name = "Remote-Agent"
+		}
+		return nil // Return nil to allow agent creation despite connection failure
 	}
 
 	// Fetch metadata if agent name or description is not set
