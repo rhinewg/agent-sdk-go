@@ -13,6 +13,7 @@ import { Send, Trash2, Loader2, RefreshCw, Building2 } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { ChatMessage as ChatMessageComponent } from './chat-message';
+import { FileTransfer, UploadedFileInfo } from './file-transfer';
 
 interface ChatAreaProps {
   agentConfig: AgentConfig | null;
@@ -26,6 +27,8 @@ export function ChatArea({ agentConfig }: ChatAreaProps) {
   const [organizationId, setOrganizationId] = useState<string>('');
   const [charCount, setCharCount] = useState(0);
   const [streamingEnabled, setStreamingEnabled] = useState(true);
+  const [uploadEnabled, setUploadEnabled] = useState(false);
+  const [uploadedFile, setUploadedFile] = useState<UploadedFileInfo | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -83,9 +86,15 @@ export function ChatArea({ agentConfig }: ChatAreaProps) {
   const sendMessage = async () => {
     if (!input.trim() || isLoading) return;
 
+    // 拼接上传文件信息到内容，作为参数传递（使用服务器绝对路径）
+    const payloadContent =
+      uploadEnabled && uploadedFile
+        ? `${input.trim()}\n\n[uploaded_file]: name=${uploadedFile.name}, path=${uploadedFile.absolutePath}`
+        : input.trim();
+
     const userMessage: ChatMessage = {
       role: 'user',
-      content: input.trim(),
+      content: payloadContent,
       timestamp: Date.now(),
       id: `msg_${Date.now()}_user`,
     };
@@ -305,6 +314,33 @@ export function ChatArea({ agentConfig }: ChatAreaProps) {
                     <Send className="h-4 w-4" />
                   )}
                 </Button>
+              </div>
+            </div>
+            <div className="flex items-start justify-between mt-3 gap-4">
+              <div className="flex items-center space-x-2">
+                <Switch
+                  id="upload-enabled"
+                  checked={uploadEnabled}
+                  onCheckedChange={setUploadEnabled}
+                  disabled={isLoading}
+                />
+                <label
+                  htmlFor="upload-enabled"
+                  className="text-xs font-medium cursor-pointer"
+                >
+                  启用文件上传
+                </label>
+                {uploadedFile && (
+                  <span className="text-xs text-muted-foreground">
+                    已上传: {uploadedFile.name}（路径: {uploadedFile.absolutePath}）
+                  </span>
+                )}
+              </div>
+              <div className="flex-1">
+                <FileTransfer
+                  enabled={uploadEnabled && !isLoading}
+                  onUploaded={(info) => setUploadedFile(info)}
+                />
               </div>
             </div>
           </div>

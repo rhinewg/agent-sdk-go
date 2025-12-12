@@ -5,10 +5,12 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -27,6 +29,7 @@ type UIConfig struct {
 	Theme       string           `json:"theme"`
 	Features    UIFeatures       `json:"features"`
 	Tracing     *UITracingConfig `json:"tracing,omitempty"`
+	UploadDir   string           `json:"upload_dir"`
 }
 
 // UIFeatures represents available UI features
@@ -288,6 +291,8 @@ func (h *HTTPServerWithUI) Start() error {
 		fmt.Printf("  - GET /api/v1/memory\n")
 		fmt.Printf("  - GET /api/v1/memory/search\n")
 		fmt.Printf("  - GET /api/v1/tools\n")
+		fmt.Printf("  - POST /api/v1/files/upload\n")
+		fmt.Printf("  - GET /api/v1/files/download\n")
 
 		if h.uiConfig.Features.Traces && h.traceCollector != nil {
 			fmt.Printf("Trace endpoints:\n")
@@ -319,6 +324,9 @@ func (h *HTTPServerWithUI) registerAPIEndpoints(mux *http.ServeMux) {
 		mux.HandleFunc("/api/v1/memory", h.withOrgContext(h.handleMemory))
 		mux.HandleFunc("/api/v1/memory/search", h.withOrgContext(h.handleMemorySearch))
 		mux.HandleFunc("/api/v1/tools", h.handleTools)
+		// File upload & download
+		mux.HandleFunc("/api/v1/files/upload", h.handleFileUpload)
+		mux.HandleFunc("/api/v1/files/download", h.handleFileDownload)
 		mux.HandleFunc("/ws/chat", h.handleWebSocketChat)
 
 		// Trace endpoints (only when traces feature is enabled)
@@ -367,6 +375,108 @@ func (h *HTTPServerWithUI) handleConfig(w http.ResponseWriter, r *http.Request) 
 	if err := json.NewEncoder(w).Encode(response); err != nil {
 		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
 	}
+}
+
+// handleFileUpload handles multipart file uploads
+func (h *HTTPServerWithUI) handleFileUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	uploadDir := h.uiConfig.UploadDir
+	if uploadDir == "" {
+		uploadDir = "/tmp"
+	}
+	if err := os.MkdirAll(uploadDir, 0o755); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to prepare upload dir: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Limit parsed form size (100 MB here; adjust as needed)
+	if err := r.ParseMultipartForm(100 << 20); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to parse multipart form: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to read file: %v", err), http.StatusBadRequest)
+		return
+	}
+	defer func() { _ = file.Close() }()
+
+	filename := filepath.Base(header.Filename)
+	if filename == "" || filename == "." || filename == string(os.PathSeparator) {
+		http.Error(w, "Invalid file name", http.StatusBadRequest)
+		return
+	}
+
+	destPath := filepath.Join(uploadDir, filename)
+	dest, err := os.Create(destPath)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to create file: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer func() { _ = dest.Close() }()
+
+	written, err := io.Copy(dest, file)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to save file: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":   "ok",
+		"file":     filename,
+		"path":     destPath,
+		"size":     written,
+		"message":  "File uploaded successfully",
+		"abs_path": destPath,
+	})
+}
+
+// handleFileDownload serves a file from uploadDir by name
+func (h *HTTPServerWithUI) handleFileDownload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	name := r.URL.Query().Get("name")
+	if name == "" {
+		http.Error(w, "Query parameter 'name' is required", http.StatusBadRequest)
+		return
+	}
+
+	filename := filepath.Base(name)
+	if filename == "" || filename == "." || filename == string(os.PathSeparator) {
+		http.Error(w, "Invalid file name", http.StatusBadRequest)
+		return
+	}
+
+	uploadDir := h.uiConfig.UploadDir
+	if uploadDir == "" {
+		uploadDir = "/tmp"
+	}
+	fullPath := filepath.Join(uploadDir, filename)
+	info, err := os.Stat(fullPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			http.Error(w, "File not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, fmt.Sprintf("Failed to access file: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if info.IsDir() {
+		http.Error(w, "Requested path is a directory", http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+	http.ServeFile(w, r, fullPath)
 }
 
 // handleSubAgents provides list of sub-agents

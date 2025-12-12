@@ -32,7 +32,7 @@ export function AgentInfoScreen({ agentConfig }: AgentInfoScreenProps) {
   useEffect(() => {
     // Use setTimeout to avoid synchronous setState in effect
     const timeoutId = setTimeout(() => {
-      checkHealth();
+    checkHealth();
     }, 0);
     const interval = setInterval(checkHealth, 30000);
     return () => {

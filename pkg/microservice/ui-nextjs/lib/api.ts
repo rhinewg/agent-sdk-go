@@ -201,6 +201,41 @@ class AgentAPI {
   async getTraceStats(): Promise<TraceStats> {
     return this.get<TraceStats>('/traces/stats');
   }
+
+  // File upload
+  async uploadFile(file: File): Promise<{
+    status: string;
+    file: string;
+    path: string;
+    size: number;
+    message: string;
+    abs_path?: string;
+  }> {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const response = await fetch(`${this.baseUrl}/files/upload`, {
+      method: 'POST',
+      body: formData,
+    });
+
+    if (!response.ok) {
+      throw new Error(`Upload Error: ${response.status} ${response.statusText}`);
+    }
+
+    return response.json();
+  }
+
+  // File download (returns Blob; caller can create object URL or save)
+  async downloadFile(name: string): Promise<Blob> {
+    const response = await fetch(`${this.baseUrl}/files/download?name=${encodeURIComponent(name)}`);
+
+    if (!response.ok) {
+      throw new Error(`Download Error: ${response.status} ${response.statusText}`);
+    }
+
+    return response.blob();
+  }
 }
 
 export const agentAPI = new AgentAPI();
