@@ -2,7 +2,9 @@ package microservice
 
 import (
 	"context"
+	"crypto/rand"
 	"embed"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Ingenimax/agent-sdk-go/pkg/agent"
@@ -30,6 +33,7 @@ type UIConfig struct {
 	Features    UIFeatures       `json:"features"`
 	Tracing     *UITracingConfig `json:"tracing,omitempty"`
 	UploadDir   string           `json:"upload_dir"`
+	Auth        *UIAuthConfig    `json:"auth,omitempty"`
 }
 
 // UIFeatures represents available UI features
@@ -39,6 +43,16 @@ type UIFeatures struct {
 	AgentInfo bool `json:"agent_info"`
 	Settings  bool `json:"settings"`
 	Traces    bool `json:"traces"`
+}
+
+// UIAuthConfig represents simple username/password based authentication
+// configured via JSON/YAML 等配置文件的 key-value。
+type UIAuthConfig struct {
+	Enabled  bool   `json:"enabled"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+	// TokenTTLMinutes 控制 token 过期时间（分钟）；0 或负数表示不过期。
+	TokenTTLMinutes int `json:"token_ttl_minutes,omitempty"`
 }
 
 // HTTPServerWithUI extends HTTPServer with embedded UI
@@ -52,6 +66,11 @@ type HTTPServerWithUI struct {
 
 	// Trace collector for UI
 	traceCollector *UITraceCollector
+
+	// authTokens 存储当前有效的登录 token -> 过期时间。
+	// 仅在当前进程内有效，重启后需要重新登录。
+	authTokens   map[string]time.Time
+	authTokensMu sync.RWMutex
 }
 
 // SubAgentInfo represents sub-agent information for UI
@@ -124,6 +143,18 @@ type DelegateRequest struct {
 	ConversationID string            `json:"conversation_id,omitempty"`
 }
 
+// LoginRequest represents a simple login request payload.
+type LoginRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+// LoginResponse represents login response with issued token.
+type LoginResponse struct {
+	Token   string `json:"token"`
+	Expires int64  `json:"expires,omitempty"` // Unix timestamp (ms)，0 表示不过期
+}
+
 // Embed UI files (will be populated at build time)
 //
 //go:embed all:ui-nextjs/out
@@ -181,6 +212,7 @@ func NewHTTPServerWithUI(agent *agent.Agent, port int, config *UIConfig) *HTTPSe
 		uiConfig:            config,
 		uiFS:                uiFS,
 		conversationHistory: make([]MemoryEntry, 0),
+		authTokens:          make(map[string]time.Time),
 	}
 
 	// Initialize trace collector if enabled
@@ -311,23 +343,27 @@ func (h *HTTPServerWithUI) registerAPIEndpoints(mux *http.ServeMux) {
 	// Health check (always available)
 	mux.HandleFunc("/health", h.handleHealth)
 
+	// Auth endpoints（登录接口不需要鉴权）
+	mux.HandleFunc("/api/v1/auth/login", h.handleLogin)
+
 	// Core agent endpoints (always available)
-	mux.HandleFunc("/api/v1/agent/run", h.withOrgContext(h.handleRun))
-	mux.HandleFunc("/api/v1/agent/stream", h.withOrgContext(h.handleStream))
+	// 通过 withAuth 中间件对 agent 交互接口进行 token 校验
+	mux.HandleFunc("/api/v1/agent/run", h.withAuth(h.withOrgContext(h.handleRun)))
+	mux.HandleFunc("/api/v1/agent/stream", h.withAuth(h.withOrgContext(h.handleStream)))
 	mux.HandleFunc("/api/v1/agent/metadata", h.handleMetadata)
 
 	// UI-specific endpoints (only when UI is enabled)
 	if h.uiConfig.Enabled {
-		mux.HandleFunc("/api/v1/agent/config", h.handleConfig)
-		mux.HandleFunc("/api/v1/agent/subagents", h.handleSubAgents)
-		mux.HandleFunc("/api/v1/agent/delegate", h.withOrgContext(h.handleDelegate))
-		mux.HandleFunc("/api/v1/memory", h.withOrgContext(h.handleMemory))
-		mux.HandleFunc("/api/v1/memory/search", h.withOrgContext(h.handleMemorySearch))
-		mux.HandleFunc("/api/v1/tools", h.handleTools)
+		mux.HandleFunc("/api/v1/agent/config", h.withAuth(h.handleConfig))
+		mux.HandleFunc("/api/v1/agent/subagents", h.withAuth(h.handleSubAgents))
+		mux.HandleFunc("/api/v1/agent/delegate", h.withAuth(h.withOrgContext(h.handleDelegate)))
+		mux.HandleFunc("/api/v1/memory", h.withAuth(h.withOrgContext(h.handleMemory)))
+		mux.HandleFunc("/api/v1/memory/search", h.withAuth(h.withOrgContext(h.handleMemorySearch)))
+		mux.HandleFunc("/api/v1/tools", h.withAuth(h.handleTools))
 		// File upload & download
-		mux.HandleFunc("/api/v1/files/upload", h.handleFileUpload)
-		mux.HandleFunc("/api/v1/files/download", h.handleFileDownload)
-		mux.HandleFunc("/ws/chat", h.handleWebSocketChat)
+		mux.HandleFunc("/api/v1/files/upload", h.withAuth(h.handleFileUpload))
+		mux.HandleFunc("/api/v1/files/download", h.withAuth(h.handleFileDownload))
+		mux.HandleFunc("/ws/chat", h.withAuth(h.handleWebSocketChat))
 
 		// Trace endpoints (only when traces feature is enabled)
 		if h.uiConfig.Features.Traces && h.traceCollector != nil {
@@ -857,6 +893,130 @@ func (h *HTTPServerWithUI) getConversationHistory(limit, offset int) []MemoryEnt
 	}
 
 	return result
+}
+
+// handleLogin handles POST /api/v1/auth/login
+// 使用配置文件中的用户名/密码进行校验，成功后返回 token。
+func (h *HTTPServerWithUI) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.uiConfig.Auth == nil || !h.uiConfig.Auth.Enabled {
+		http.Error(w, "Authentication is disabled", http.StatusForbidden)
+		return
+	}
+
+	var req LoginRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	if req.Username == "" || req.Password == "" {
+		http.Error(w, "Username and password are required", http.StatusBadRequest)
+		return
+	}
+
+	// 简单用户名/密码匹配（生产环境建议改为更安全的方案，例如哈希）
+	if req.Username != h.uiConfig.Auth.Username || req.Password != h.uiConfig.Auth.Password {
+		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
+		return
+	}
+
+	// 生成随机 token
+	token, err := generateRandomToken(32)
+	if err != nil {
+		http.Error(w, "Failed to generate token", http.StatusInternalServerError)
+		return
+	}
+
+	// 计算过期时间
+	var expiresAt time.Time
+	if h.uiConfig.Auth.TokenTTLMinutes > 0 {
+		expiresAt = time.Now().Add(time.Duration(h.uiConfig.Auth.TokenTTLMinutes) * time.Minute)
+	}
+
+	h.authTokensMu.Lock()
+	if h.authTokens == nil {
+		h.authTokens = make(map[string]time.Time)
+	}
+	h.authTokens[token] = expiresAt
+	h.authTokensMu.Unlock()
+
+	resp := LoginResponse{
+		Token: token,
+	}
+	if !expiresAt.IsZero() {
+		resp.Expires = expiresAt.UnixMilli()
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+	}
+}
+
+// withAuth wraps handlers that require a valid auth token.
+// 当 UIConfig.Auth.Enabled=false 或未配置时，该中间件直接放行。
+func (h *HTTPServerWithUI) withAuth(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// 若未启用认证，则直接放行，保持向后兼容。
+		if h.uiConfig == nil || h.uiConfig.Auth == nil || !h.uiConfig.Auth.Enabled {
+			handler(w, r)
+			return
+		}
+
+		// 从 Header 中读取 Bearer Token
+		authHeader := r.Header.Get("Authorization")
+		var token string
+		if strings.HasPrefix(authHeader, "Bearer ") {
+			token = strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
+		}
+		// 也允许通过查询参数 ?token= 传递，方便简单前端集成或调试
+		if token == "" {
+			token = r.URL.Query().Get("token")
+		}
+
+		if token == "" {
+			http.Error(w, "Unauthorized: missing token", http.StatusUnauthorized)
+			return
+		}
+
+		h.authTokensMu.RLock()
+		expireAt, ok := h.authTokens[token]
+		h.authTokensMu.RUnlock()
+
+		if !ok {
+			http.Error(w, "Unauthorized: invalid token", http.StatusUnauthorized)
+			return
+		}
+		if !expireAt.IsZero() && time.Now().After(expireAt) {
+			// token 过期后删除
+			h.authTokensMu.Lock()
+			delete(h.authTokens, token)
+			h.authTokensMu.Unlock()
+			http.Error(w, "Unauthorized: token expired", http.StatusUnauthorized)
+			return
+		}
+
+		// 通过校验，进入实际处理逻辑
+		handler(w, r)
+	}
+}
+
+// generateRandomToken generates a URL-safe random token with given byte length.
+func generateRandomToken(byteLen int) (string, error) {
+	if byteLen <= 0 {
+		byteLen = 32
+	}
+	buf := make([]byte, byteLen)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	// 使用 URL-safe base64 编码，去掉填充符，便于在 Header / URL 中传递
+	return base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
 // getAllConversationsWithContext gets all conversations with request context (but ignores org isolation)
