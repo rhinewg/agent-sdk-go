@@ -12,7 +12,27 @@ import { AgentConfig } from '@/types/agent';
 import { agentAPI } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { MessageSquare, Bot, Wrench, Database, Users, Settings, Activity } from 'lucide-react';
+import {
+  MessageSquare,
+  Bot,
+  Wrench,
+  Database,
+  Users,
+  Settings,
+  Activity,
+  LogIn,
+  LogOut,
+} from 'lucide-react';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
 
 type ActiveScreen = 'chat' | 'agent-info' | 'tools' | 'memory' | 'sub-agents' | 'traces' | 'settings';
 
@@ -73,9 +93,24 @@ export function MainLayout() {
   const [agentConfig, setAgentConfig] = useState<AgentConfig | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [loginOpen, setLoginOpen] = useState(false);
+  const [loginLoading, setLoginLoading] = useState(false);
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
 
   useEffect(() => {
+    // 尝试从 localStorage 恢复已有 token
+    if (typeof window !== 'undefined') {
+      const savedToken = window.localStorage.getItem('agent_auth_token');
+      if (savedToken) {
+        agentAPI.setAuthToken(savedToken);
+        setIsAuthenticated(true);
+      }
+    }
     loadAgentConfig();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // System theme detection when agent config is loaded
@@ -105,13 +140,56 @@ export function MainLayout() {
   const loadAgentConfig = async () => {
     try {
       setLoading(true);
+      setError(null);
       const config = await agentAPI.getAgentConfig();
       setAgentConfig(config);
+      setIsAuthenticated(true);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load agent config');
+      const msg = err instanceof Error ? err.message : 'Failed to load agent config';
+      // 未认证时后端会返回 401，这里视为“未登录”，弹出登录框而不是报错页
+      if (msg.includes('401')) {
+        setIsAuthenticated(false);
+        setAgentConfig(null);
+        setLoginOpen(true);
+        setError(null);
+      } else {
+        setError(msg);
+      }
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoginLoading(true);
+    setLoginError(null);
+    try {
+      const result = await agentAPI.login(username.trim(), password);
+      if (typeof window !== 'undefined') {
+        window.localStorage.setItem('agent_auth_token', result.token);
+      }
+      setIsAuthenticated(true);
+      setLoginOpen(false);
+      setUsername('');
+      setPassword('');
+      await loadAgentConfig();
+    } catch (err) {
+      setLoginError(err instanceof Error ? err.message : '登录失败');
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
+  const handleLogout = () => {
+    agentAPI.setAuthToken(null);
+    if (typeof window !== 'undefined') {
+      window.localStorage.removeItem('agent_auth_token');
+    }
+    setIsAuthenticated(false);
+    setAgentConfig(null);
+    setActiveScreen('chat');
+    setLoginOpen(true);
   };
 
   const renderActiveScreen = () => {
@@ -179,8 +257,21 @@ export function MainLayout() {
           <div className="flex items-center space-x-2">
             <div className="flex items-center space-x-1">
               <div className="h-2 w-2 bg-green-500 rounded-full"></div>
-              <span className="text-sm text-muted-foreground">Ready</span>
+              <span className="text-sm text-muted-foreground">
+                {isAuthenticated ? 'Ready' : 'Not logged in'}
+              </span>
             </div>
+            {isAuthenticated ? (
+              <Button variant="outline" size="sm" onClick={handleLogout}>
+                <LogOut className="h-4 w-4 mr-1" />
+                退出登录
+              </Button>
+            ) : (
+              <Button variant="default" size="sm" onClick={() => setLoginOpen(true)}>
+                <LogIn className="h-4 w-4 mr-1" />
+                登录
+              </Button>
+            )}
           </div>
         </div>
       </header>
@@ -208,6 +299,7 @@ export function MainLayout() {
                 onClick={() => setActiveScreen(item.id)}
                 className={`flex items-center gap-2 ${isActive ? '' : 'text-muted-foreground'}`}
                 title={item.description}
+                disabled={!isAuthenticated}
               >
                 <Icon className="h-4 w-4" />
                 <span className="hidden sm:inline">{item.label}</span>
@@ -220,9 +312,66 @@ export function MainLayout() {
       {/* Main Content */}
       <main className="flex-1 overflow-auto">
         <div className="h-full overflow-y-auto">
-          {renderActiveScreen()}
+          {isAuthenticated ? (
+            renderActiveScreen()
+          ) : (
+            <div className="flex h-full items-center justify-center">
+              <div className="text-center space-y-2">
+                <p className="text-lg font-medium">请先登录以使用 Agent UI 功能</p>
+                <p className="text-sm text-muted-foreground">
+                  点击右上角「登录」按钮。
+                </p>
+                <Button variant="default" size="sm" onClick={() => setLoginOpen(true)}>
+                  <LogIn className="h-4 w-4 mr-1" />
+                  去登录
+                </Button>
+              </div>
+            </div>
+          )}
         </div>
       </main>
+
+      {/* 登录弹窗 */}
+      <Dialog open={loginOpen} onOpenChange={setLoginOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>登录</DialogTitle>
+          </DialogHeader>
+          <form className="space-y-4" onSubmit={handleLogin}>
+            <div className="space-y-2">
+              <Label htmlFor="login-username">用户名</Label>
+              <Input
+                id="login-username"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                autoComplete="username"
+                required
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="login-password">密码</Label>
+              <Input
+                id="login-password"
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                autoComplete="current-password"
+                required
+              />
+            </div>
+            {loginError && (
+              <p className="text-sm text-red-500">
+                {loginError}
+              </p>
+            )}
+            <DialogFooter>
+              <Button type="submit" disabled={loginLoading}>
+                {loginLoading ? '登录中...' : '登录'}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

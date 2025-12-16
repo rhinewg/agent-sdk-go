@@ -18,13 +18,32 @@ const API_BASE_URL = '/api/v1';
 
 class AgentAPI {
   private baseUrl: string;
+  private authToken: string | null = null;
 
   constructor(baseUrl = API_BASE_URL) {
     this.baseUrl = baseUrl;
   }
 
+  // 设置/清除当前使用的认证 token
+  setAuthToken(token: string | null) {
+    this.authToken = token;
+  }
+
+  // 为请求构建通用 Header（自动附加 Authorization）
+  private buildHeaders(extra?: HeadersInit): HeadersInit {
+    const headers: HeadersInit = {
+      ...(extra || {}),
+    };
+    if (this.authToken) {
+      (headers as Record<string, string>)['Authorization'] = `Bearer ${this.authToken}`;
+    }
+    return headers;
+  }
+
   async get<T>(endpoint: string): Promise<T> {
-    const response = await fetch(`${this.baseUrl}${endpoint}`);
+    const response = await fetch(`${this.baseUrl}${endpoint}`, {
+      headers: this.buildHeaders(),
+    });
     if (!response.ok) {
       throw new Error(`API Error: ${response.status} ${response.statusText}`);
     }
@@ -34,9 +53,9 @@ class AgentAPI {
   async post<T>(endpoint: string, data: unknown): Promise<T> {
     const response = await fetch(`${this.baseUrl}${endpoint}`, {
       method: 'POST',
-      headers: {
+      headers: this.buildHeaders({
         'Content-Type': 'application/json',
-      },
+      }),
       body: JSON.stringify(data),
     });
     if (!response.ok) {
@@ -108,10 +127,10 @@ class AgentAPI {
   async *streamAgent(data: StreamRequest): AsyncGenerator<StreamEventData, void, unknown> {
     const response = await fetch(`${this.baseUrl}/agent/stream`, {
       method: 'POST',
-      headers: {
+      headers: this.buildHeaders({
         'Content-Type': 'application/json',
         'Accept': 'text/event-stream',
-      },
+      }),
       body: JSON.stringify(data),
     });
 
@@ -216,6 +235,7 @@ class AgentAPI {
 
     const response = await fetch(`${this.baseUrl}/files/upload`, {
       method: 'POST',
+      headers: this.buildHeaders(),
       body: formData,
     });
 
@@ -228,13 +248,37 @@ class AgentAPI {
 
   // File download (returns Blob; caller can create object URL or save)
   async downloadFile(name: string): Promise<Blob> {
-    const response = await fetch(`${this.baseUrl}/files/download?name=${encodeURIComponent(name)}`);
+    const response = await fetch(
+      `${this.baseUrl}/files/download?name=${encodeURIComponent(name)}`,
+      {
+        headers: this.buildHeaders(),
+      }
+    );
 
     if (!response.ok) {
       throw new Error(`Download Error: ${response.status} ${response.statusText}`);
     }
 
     return response.blob();
+  }
+
+  // Auth: 登录，返回 token，并自动写入 AgentAPI 的 authToken
+  async login(username: string, password: string): Promise<{ token: string; expires?: number }> {
+    const response = await fetch(`${this.baseUrl}/auth/login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ username, password }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Login failed: ${response.status} ${response.statusText}`);
+    }
+
+    const data: { token: string; expires?: number } = await response.json();
+    this.setAuthToken(data.token || '');
+    return data;
   }
 }
 
