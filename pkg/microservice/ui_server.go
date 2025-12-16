@@ -22,6 +22,7 @@ import (
 	"github.com/Ingenimax/agent-sdk-go/pkg/interfaces"
 	"github.com/Ingenimax/agent-sdk-go/pkg/memory"
 	"github.com/Ingenimax/agent-sdk-go/pkg/multitenancy"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // UIConfig represents UI configuration options
@@ -45,12 +46,23 @@ type UIFeatures struct {
 	Traces    bool `json:"traces"`
 }
 
-// UIAuthConfig represents simple username/password based authentication
+// UIUser represents a single user with username and password
+// 支持两种方式：
+// 1. 明文密码（Password）：用于开发环境，不推荐生产环境使用
+// 2. 哈希密码（PasswordHash）：推荐用于生产环境，使用 bcrypt 哈希
+// 如果同时提供了 PasswordHash，将优先使用哈希验证；否则回退到明文比较（向后兼容）
+type UIUser struct {
+	Username     string `json:"username"`
+	Password     string `json:"password,omitempty"`      // 明文密码（向后兼容，不推荐生产环境使用）
+	PasswordHash string `json:"password_hash,omitempty"` // bcrypt 哈希密码（推荐）
+}
+
+// UIAuthConfig represents username/password based authentication
 // configured via JSON/YAML 等配置文件的 key-value。
+// 支持用户列表，列表中任何用户名和密码匹配的用户都可以登录。
 type UIAuthConfig struct {
-	Enabled  bool   `json:"enabled"`
-	Username string `json:"username"`
-	Password string `json:"password"`
+	Enabled bool     `json:"enabled"`
+	Users   []UIUser `json:"users"`
 	// TokenTTLMinutes 控制 token 过期时间（分钟）；0 或负数表示不过期。
 	TokenTTLMinutes int `json:"token_ttl_minutes,omitempty"`
 }
@@ -919,8 +931,33 @@ func (h *HTTPServerWithUI) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 简单用户名/密码匹配（生产环境建议改为更安全的方案，例如哈希）
-	if req.Username != h.uiConfig.Auth.Username || req.Password != h.uiConfig.Auth.Password {
+	// 遍历用户列表进行验证
+	// 优先使用 bcrypt 哈希验证，如果没有哈希则回退到明文比较（向后兼容）
+	validUser := false
+	for _, user := range h.uiConfig.Auth.Users {
+		if req.Username != user.Username {
+			continue
+		}
+
+		// 优先使用哈希验证（推荐方式）
+		if user.PasswordHash != "" {
+			err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password))
+			if err == nil {
+				validUser = true
+				break
+			}
+			// 哈希验证失败，继续检查下一个用户
+			continue
+		}
+
+		// 回退到明文比较（向后兼容，不推荐生产环境使用）
+		if user.Password != "" && req.Password == user.Password {
+			validUser = true
+			break
+		}
+	}
+
+	if !validUser {
 		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
 		return
 	}
@@ -1017,6 +1054,24 @@ func generateRandomToken(byteLen int) (string, error) {
 	}
 	// 使用 URL-safe base64 编码，去掉填充符，便于在 Header / URL 中传递
 	return base64.RawURLEncoding.EncodeToString(buf), nil
+}
+
+// GeneratePasswordHash 生成 bcrypt 密码哈希，用于配置文件中存储密码哈希值
+// cost 参数控制哈希的计算成本（4-31），默认值为 10，值越大越安全但计算越慢
+// 返回的哈希值可以直接存储在配置文件的 password_hash 字段中
+func GeneratePasswordHash(password string, cost int) (string, error) {
+	if cost < bcrypt.MinCost {
+		cost = bcrypt.DefaultCost // 默认值为 10
+	}
+	if cost > bcrypt.MaxCost {
+		cost = bcrypt.MaxCost
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), cost)
+	if err != nil {
+		return "", fmt.Errorf("failed to generate password hash: %w", err)
+	}
+	return string(hash), nil
 }
 
 // getAllConversationsWithContext gets all conversations with request context (but ignores org isolation)
