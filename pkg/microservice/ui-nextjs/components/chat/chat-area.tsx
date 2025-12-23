@@ -31,7 +31,6 @@ type ToolCallItem = {
   arguments?: string;
   result?: string;
   timestamp: number;
-  messageId: string;
 };
 
 export function ChatArea({ agentConfig }: ChatAreaProps) {
@@ -46,6 +45,8 @@ export function ChatArea({ agentConfig }: ChatAreaProps) {
   const [uploadedFile, setUploadedFile] = useState<UploadedFileInfo | null>(null);
   const [thinkingSteps, setThinkingSteps] = useState<ThinkingStepItem[]>([]);
   const [toolCalls, setToolCalls] = useState<ToolCallItem[]>([]);
+  const [showThinking, setShowThinking] = useState(false);
+  const [showToolCalls, setShowToolCalls] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -108,44 +109,6 @@ export function ChatArea({ agentConfig }: ChatAreaProps) {
       }
       return newMessages;
     });
-  };
-
-  const addToolCallMessage = (call: ToolCallItem) => {
-    const parts: string[] = [
-      `Tool: ${call.name}`,
-      `Status: ${call.status}`,
-    ];
-    if (call.arguments) {
-      parts.push(`Arguments:\n${call.arguments}`);
-    }
-    if (call.result) {
-      parts.push(`Result:\n${call.result}`);
-    }
-    const content = parts.join('\n\n');
-    const toolMessage: ChatMessage = {
-      role: 'assistant',
-      content,
-      timestamp: Date.now(),
-      id: call.messageId,
-    };
-    addMessage(toolMessage);
-  };
-
-  const updateToolCallMessage = (messageId: string, call: ToolCallItem) => {
-    const parts: string[] = [
-      `Tool: ${call.name}`,
-      `Status: ${call.status}`,
-    ];
-    if (call.arguments) {
-      parts.push(`Arguments:\n${call.arguments}`);
-    }
-    if (call.result) {
-      parts.push(`Result:\n${call.result}`);
-    }
-    const content = parts.join('\n\n');
-    setMessages((prev) =>
-      prev.map((m) => (m.id === messageId ? { ...m, content, timestamp: Date.now() } : m)),
-    );
   };
 
   const sendMessage = async () => {
@@ -223,10 +186,6 @@ export function ChatArea({ agentConfig }: ChatAreaProps) {
                   return incomingId && (item.id === incomingId || item.name === eventData.tool_call?.name);
                 },
               );
-              const messageId =
-                eventData.tool_call?.id ||
-                eventData.tool_call?.name ||
-                (existingIndex >= 0 ? prev[existingIndex].messageId : `tool_${Date.now()}`);
               const updatedItem: ToolCallItem = {
                 id: eventData.tool_call?.id,
                 name: eventData.tool_call?.name ?? 'unknown_tool',
@@ -234,17 +193,13 @@ export function ChatArea({ agentConfig }: ChatAreaProps) {
                 arguments: stringifyMaybe(eventData.tool_call?.arguments),
                 result: stringifyMaybe(eventData.tool_call?.result),
                 timestamp: Date.now(),
-                messageId,
               };
 
               if (existingIndex >= 0) {
                 const next = [...prev];
                 next[existingIndex] = { ...next[existingIndex], ...updatedItem };
-                updateToolCallMessage(next[existingIndex].messageId, next[existingIndex]);
                 return next;
               }
-                // 新增时将调用过程追加到聊天记录
-                addToolCallMessage(updatedItem);
               return [...prev, updatedItem];
             });
           }
@@ -335,53 +290,75 @@ export function ChatArea({ agentConfig }: ChatAreaProps) {
                 {/* Thinking steps */}
                 {thinkingSteps.length > 0 && (
                   <div className="space-y-2 rounded-md border border-border bg-muted/40 p-3">
-                    <div className="text-xs font-medium text-muted-foreground">Thinking Steps</div>
-                    <div className="space-y-1">
-                      {thinkingSteps.map((step, idx) => (
-                        <div key={idx} className="text-xs leading-5">
-                          <span className="mr-2 text-[10px] text-muted-foreground">
-                            {new Date(step.timestamp).toLocaleTimeString()}
-                          </span>
-                          {step.content}
-                        </div>
-                      ))}
+                    <div className="flex items-center justify-between text-xs font-medium text-muted-foreground">
+                      <span>Thinking Steps ({thinkingSteps.length})</span>
+                      <button
+                        type="button"
+                        className="text-[11px] underline"
+                        onClick={() => setShowThinking((v) => !v)}
+                      >
+                        {showThinking ? '收起' : '展开'}
+                      </button>
                     </div>
+                    {showThinking && (
+                      <div className="space-y-1">
+                        {thinkingSteps.map((step, idx) => (
+                          <div key={idx} className="text-xs leading-5">
+                            <span className="mr-2 text-[10px] text-muted-foreground">
+                              {new Date(step.timestamp).toLocaleTimeString()}
+                            </span>
+                            {step.content}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 )}
 
                 {/* Tool calls */}
                 {toolCalls.length > 0 && (
                   <div className="space-y-2 rounded-md border border-border bg-muted/40 p-3">
-                    <div className="text-xs font-medium text-muted-foreground">Tool Calls / MCP</div>
-                    <div className="space-y-2">
-                      {toolCalls.map((tool, idx) => (
-                        <div key={tool.id || idx} className="rounded border border-border bg-background p-2 text-xs">
-                          <div className="flex items-center justify-between">
-                            <div className="font-semibold">{tool.name}</div>
-                            <div className="text-[10px] text-muted-foreground">
-                              {new Date(tool.timestamp).toLocaleTimeString()}
-                            </div>
-                          </div>
-                          <div className="text-[11px] text-muted-foreground">Status: {tool.status}</div>
-                          {tool.arguments && (
-                            <div className="mt-1">
-                              <div className="font-medium">Args:</div>
-                              <pre className="whitespace-pre-wrap break-all rounded bg-muted p-2">
-                                {tool.arguments}
-                              </pre>
-                            </div>
-                          )}
-                          {tool.result && (
-                            <div className="mt-1">
-                              <div className="font-medium">Result:</div>
-                              <pre className="whitespace-pre-wrap break-all rounded bg-muted p-2">
-                                {tool.result}
-                              </pre>
-                            </div>
-                          )}
-                        </div>
-                      ))}
+                    <div className="flex items-center justify-between text-xs font-medium text-muted-foreground">
+                      <span>Tool Calls / MCP ({toolCalls.length})</span>
+                      <button
+                        type="button"
+                        className="text-[11px] underline"
+                        onClick={() => setShowToolCalls((v) => !v)}
+                      >
+                        {showToolCalls ? '收起' : '展开'}
+                      </button>
                     </div>
+                    {showToolCalls && (
+                      <div className="space-y-2">
+                        {toolCalls.map((tool, idx) => (
+                          <div key={tool.id || idx} className="rounded border border-border bg-background p-2 text-xs">
+                            <div className="flex items-center justify-between">
+                              <div className="font-semibold">{tool.name}</div>
+                              <div className="text-[10px] text-muted-foreground">
+                                {new Date(tool.timestamp).toLocaleTimeString()}
+                              </div>
+                            </div>
+                            <div className="text-[11px] text-muted-foreground">Status: {tool.status}</div>
+                            {tool.arguments && (
+                              <div className="mt-1">
+                                <div className="font-medium">Args:</div>
+                                <pre className="whitespace-pre-wrap break-all rounded bg-muted p-2">
+                                  {tool.arguments}
+                                </pre>
+                              </div>
+                            )}
+                            {tool.result && (
+                              <div className="mt-1">
+                                <div className="font-medium">Result:</div>
+                                <pre className="whitespace-pre-wrap break-all rounded bg-muted p-2">
+                                  {tool.result}
+                                </pre>
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
