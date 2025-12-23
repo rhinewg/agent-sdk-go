@@ -19,6 +19,20 @@ interface ChatAreaProps {
   agentConfig: AgentConfig | null;
 }
 
+type ThinkingStepItem = {
+  content: string;
+  timestamp: number;
+};
+
+type ToolCallItem = {
+  id?: string;
+  name: string;
+  status: string;
+  arguments?: string;
+  result?: string;
+  timestamp: number;
+};
+
 export function ChatArea({ agentConfig }: ChatAreaProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
@@ -29,6 +43,8 @@ export function ChatArea({ agentConfig }: ChatAreaProps) {
   const [streamingEnabled, setStreamingEnabled] = useState(true);
   const [uploadEnabled, setUploadEnabled] = useState(false);
   const [uploadedFile, setUploadedFile] = useState<UploadedFileInfo | null>(null);
+  const [thinkingSteps, setThinkingSteps] = useState<ThinkingStepItem[]>([]);
+  const [toolCalls, setToolCalls] = useState<ToolCallItem[]>([]);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -86,6 +102,10 @@ export function ChatArea({ agentConfig }: ChatAreaProps) {
   const sendMessage = async () => {
     if (!input.trim() || isLoading) return;
 
+    // 清空上一轮的思考步骤和工具调用展示
+    setThinkingSteps([]);
+    setToolCalls([]);
+
     // 拼接上传文件信息到内容，作为参数传递（使用服务器绝对路径）
     const payloadContent =
       uploadEnabled && uploadedFile
@@ -137,6 +157,38 @@ export function ChatArea({ agentConfig }: ChatAreaProps) {
             updateLastMessage(fullContent);
           }
 
+          // Thinking steps
+          if (eventData.thinking_step) {
+            setThinkingSteps((prev) => [
+              ...prev,
+              { content: eventData.thinking_step!, timestamp: Date.now() },
+            ]);
+          }
+
+          // MCP/Tool calls
+          if (eventData.tool_call) {
+            setToolCalls((prev) => {
+              const existingIndex = prev.findIndex(
+                (item) => item.id && eventData.tool_call?.id && item.id === eventData.tool_call.id,
+              );
+              const updatedItem: ToolCallItem = {
+                id: eventData.tool_call?.id,
+                name: eventData.tool_call?.name ?? 'unknown_tool',
+                status: eventData.tool_call?.status ?? 'unknown',
+                arguments: eventData.tool_call?.arguments,
+                result: eventData.tool_call?.result,
+                timestamp: Date.now(),
+              };
+
+              if (existingIndex >= 0) {
+                const next = [...prev];
+                next[existingIndex] = { ...next[existingIndex], ...updatedItem };
+                return next;
+              }
+              return [...prev, updatedItem];
+            });
+          }
+
           if (eventData.is_final || eventData.type === 'done') {
             break;
           }
@@ -174,6 +226,8 @@ export function ChatArea({ agentConfig }: ChatAreaProps) {
   const clearChat = () => {
     setMessages([]);
     setConversationId('');
+    setThinkingSteps([]);
+    setToolCalls([]);
     // Don't clear organization ID as user might want to keep it
   };
 
@@ -217,6 +271,59 @@ export function ChatArea({ agentConfig }: ChatAreaProps) {
                   </div>
                 )}
                 <div ref={messagesEndRef} />
+
+                {/* Thinking steps */}
+                {thinkingSteps.length > 0 && (
+                  <div className="space-y-2 rounded-md border border-border bg-muted/40 p-3">
+                    <div className="text-xs font-medium text-muted-foreground">Thinking Steps</div>
+                    <div className="space-y-1">
+                      {thinkingSteps.map((step, idx) => (
+                        <div key={idx} className="text-xs leading-5">
+                          <span className="mr-2 text-[10px] text-muted-foreground">
+                            {new Date(step.timestamp).toLocaleTimeString()}
+                          </span>
+                          {step.content}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Tool calls */}
+                {toolCalls.length > 0 && (
+                  <div className="space-y-2 rounded-md border border-border bg-muted/40 p-3">
+                    <div className="text-xs font-medium text-muted-foreground">Tool Calls / MCP</div>
+                    <div className="space-y-2">
+                      {toolCalls.map((tool, idx) => (
+                        <div key={tool.id || idx} className="rounded border border-border bg-background p-2 text-xs">
+                          <div className="flex items-center justify-between">
+                            <div className="font-semibold">{tool.name}</div>
+                            <div className="text-[10px] text-muted-foreground">
+                              {new Date(tool.timestamp).toLocaleTimeString()}
+                            </div>
+                          </div>
+                          <div className="text-[11px] text-muted-foreground">Status: {tool.status}</div>
+                          {tool.arguments && (
+                            <div className="mt-1">
+                              <div className="font-medium">Args:</div>
+                              <pre className="whitespace-pre-wrap break-all rounded bg-muted p-2">
+                                {tool.arguments}
+                              </pre>
+                            </div>
+                          )}
+                          {tool.result && (
+                            <div className="mt-1">
+                              <div className="font-medium">Result:</div>
+                              <pre className="whitespace-pre-wrap break-all rounded bg-muted p-2">
+                                {tool.result}
+                              </pre>
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </div>
