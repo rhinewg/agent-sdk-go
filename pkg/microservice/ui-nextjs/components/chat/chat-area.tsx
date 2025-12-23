@@ -31,6 +31,7 @@ type ToolCallItem = {
   arguments?: string;
   result?: string;
   timestamp: number;
+  messageId: string;
 };
 
 export function ChatArea({ agentConfig }: ChatAreaProps) {
@@ -125,9 +126,26 @@ export function ChatArea({ agentConfig }: ChatAreaProps) {
       role: 'assistant',
       content,
       timestamp: Date.now(),
-      id: `tool_${Date.now()}_${call.name}`,
+      id: call.messageId,
     };
     addMessage(toolMessage);
+  };
+
+  const updateToolCallMessage = (messageId: string, call: ToolCallItem) => {
+    const parts: string[] = [
+      `Tool: ${call.name}`,
+      `Status: ${call.status}`,
+    ];
+    if (call.arguments) {
+      parts.push(`Arguments:\n${call.arguments}`);
+    }
+    if (call.result) {
+      parts.push(`Result:\n${call.result}`);
+    }
+    const content = parts.join('\n\n');
+    setMessages((prev) =>
+      prev.map((m) => (m.id === messageId ? { ...m, content, timestamp: Date.now() } : m)),
+    );
   };
 
   const sendMessage = async () => {
@@ -200,8 +218,15 @@ export function ChatArea({ agentConfig }: ChatAreaProps) {
           if (eventData.tool_call) {
             setToolCalls((prev) => {
               const existingIndex = prev.findIndex(
-                (item) => item.id && eventData.tool_call?.id && item.id === eventData.tool_call.id,
+                (item) => {
+                  const incomingId = eventData.tool_call?.id || eventData.tool_call?.name;
+                  return incomingId && (item.id === incomingId || item.name === eventData.tool_call?.name);
+                },
               );
+              const messageId =
+                eventData.tool_call?.id ||
+                eventData.tool_call?.name ||
+                (existingIndex >= 0 ? prev[existingIndex].messageId : `tool_${Date.now()}`);
               const updatedItem: ToolCallItem = {
                 id: eventData.tool_call?.id,
                 name: eventData.tool_call?.name ?? 'unknown_tool',
@@ -209,11 +234,13 @@ export function ChatArea({ agentConfig }: ChatAreaProps) {
                 arguments: stringifyMaybe(eventData.tool_call?.arguments),
                 result: stringifyMaybe(eventData.tool_call?.result),
                 timestamp: Date.now(),
+                messageId,
               };
 
               if (existingIndex >= 0) {
                 const next = [...prev];
                 next[existingIndex] = { ...next[existingIndex], ...updatedItem };
+                updateToolCallMessage(next[existingIndex].messageId, next[existingIndex]);
                 return next;
               }
                 // 新增时将调用过程追加到聊天记录
