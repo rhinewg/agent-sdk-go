@@ -43,6 +43,8 @@ type ToolCall struct {
 	DisplayName string `json:"display_name,omitempty"`
 	Internal    bool   `json:"internal,omitempty"`
 	Arguments   string `json:"arguments"`
+	Result      string `json:"result,omitempty"`
+	Status      string `json:"status,omitempty"`
 }
 
 // Memory represents a memory store for agent conversations

@@ -478,13 +478,17 @@ func (a *Agent) convertLLMEventToAgentEvent(llmEvent interfaces.StreamEvent, too
 		agentEvent.Type = interfaces.AgentEventToolCall
 		if llmEvent.ToolCall != nil {
 			displayName, internal := getToolMetadata(llmEvent.ToolCall.Name, tools)
+			status := llmEvent.ToolCall.Status
+			if status == "" {
+				status = "received"
+			}
 			agentEvent.ToolCall = &interfaces.ToolCallEvent{
 				ID:          llmEvent.ToolCall.ID,
 				Name:        llmEvent.ToolCall.Name,
 				DisplayName: displayName,
 				Internal:    internal,
 				Arguments:   llmEvent.ToolCall.Arguments,
-				Status:      "received",
+				Status:      status,
 			}
 		}
 
@@ -492,14 +496,33 @@ func (a *Agent) convertLLMEventToAgentEvent(llmEvent interfaces.StreamEvent, too
 		agentEvent.Type = interfaces.AgentEventToolResult
 		if llmEvent.ToolCall != nil {
 			displayName, internal := getToolMetadata(llmEvent.ToolCall.Name, tools)
+			// Result 可能出现在 ToolCall.Result 或 Content 中，优先使用 ToolCall.Result
+			result := llmEvent.ToolCall.Result
+			if result == "" {
+				result = llmEvent.Content
+			}
+			// 某些实现将结果放在 Metadata["result"]
+			if result == "" && llmEvent.Metadata != nil {
+				if metaResult, ok := llmEvent.Metadata["result"]; ok && metaResult != nil {
+					if s, ok := metaResult.(string); ok {
+						result = s
+					} else {
+						result = fmt.Sprintf("%v", metaResult)
+					}
+				}
+			}
+			status := llmEvent.ToolCall.Status
+			if status == "" {
+				status = "completed"
+			}
 			agentEvent.ToolCall = &interfaces.ToolCallEvent{
 				ID:          llmEvent.ToolCall.ID,
 				Name:        llmEvent.ToolCall.Name,
 				DisplayName: displayName,
 				Internal:    internal,
 				Arguments:   llmEvent.ToolCall.Arguments,
-				Result:      llmEvent.Content, // Tool result is in Content field of StreamEvent
-				Status:      "completed",
+				Result:      result, // Tool result may come from ToolCall.Result or Content
+				Status:      status,
 			}
 		}
 
