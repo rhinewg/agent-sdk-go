@@ -49,6 +49,16 @@ export function ChatArea({ agentConfig }: ChatAreaProps) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
+  const stringifyMaybe = (val: unknown) => {
+    if (val === undefined || val === null) return undefined;
+    if (typeof val === 'string') return val;
+    try {
+      return JSON.stringify(val, null, 2);
+    } catch {
+      return String(val);
+    }
+  };
+
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
@@ -97,6 +107,27 @@ export function ChatArea({ agentConfig }: ChatAreaProps) {
       }
       return newMessages;
     });
+  };
+
+  const addToolCallMessage = (call: ToolCallItem) => {
+    const parts: string[] = [
+      `Tool: ${call.name}`,
+      `Status: ${call.status}`,
+    ];
+    if (call.arguments) {
+      parts.push(`Arguments:\n${call.arguments}`);
+    }
+    if (call.result) {
+      parts.push(`Result:\n${call.result}`);
+    }
+    const content = parts.join('\n\n');
+    const toolMessage: ChatMessage = {
+      role: 'assistant',
+      content,
+      timestamp: Date.now(),
+      id: `tool_${Date.now()}_${call.name}`,
+    };
+    addMessage(toolMessage);
   };
 
   const sendMessage = async () => {
@@ -175,8 +206,8 @@ export function ChatArea({ agentConfig }: ChatAreaProps) {
                 id: eventData.tool_call?.id,
                 name: eventData.tool_call?.name ?? 'unknown_tool',
                 status: eventData.tool_call?.status ?? 'unknown',
-                arguments: eventData.tool_call?.arguments,
-                result: eventData.tool_call?.result,
+                arguments: stringifyMaybe(eventData.tool_call?.arguments),
+                result: stringifyMaybe(eventData.tool_call?.result),
                 timestamp: Date.now(),
               };
 
@@ -185,6 +216,8 @@ export function ChatArea({ agentConfig }: ChatAreaProps) {
                 next[existingIndex] = { ...next[existingIndex], ...updatedItem };
                 return next;
               }
+                // 新增时将调用过程追加到聊天记录
+                addToolCallMessage(updatedItem);
               return [...prev, updatedItem];
             });
           }
