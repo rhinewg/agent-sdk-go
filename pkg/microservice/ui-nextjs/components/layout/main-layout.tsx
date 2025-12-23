@@ -109,7 +109,7 @@ export function MainLayout() {
         setIsAuthenticated(true);
       }
     }
-    loadAgentConfig();
+    loadAgentConfig(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -137,7 +137,7 @@ export function MainLayout() {
     }
   }, [agentConfig?.ui_theme]);
 
-  const loadAgentConfig = async () => {
+  const loadAgentConfig = async (openLoginOnUnauthorized = false) => {
     try {
       setLoading(true);
       setError(null);
@@ -150,8 +150,10 @@ export function MainLayout() {
       if (msg.includes('401')) {
         setIsAuthenticated(false);
         setAgentConfig(null);
-        setLoginOpen(true);
         setError(null);
+        if (openLoginOnUnauthorized) {
+          setLoginOpen(true);
+        }
       } else {
         setError(msg);
       }
@@ -192,27 +194,6 @@ export function MainLayout() {
     setLoginOpen(true);
   };
 
-  const renderActiveScreen = () => {
-    switch (activeScreen) {
-      case 'chat':
-        return <ChatArea agentConfig={agentConfig} />;
-      case 'agent-info':
-        return <AgentInfoScreen agentConfig={agentConfig} />;
-      case 'tools':
-        return <ToolsScreen />;
-      case 'memory':
-        return <MemoryScreen />;
-      case 'sub-agents':
-        return <SubAgentsScreen />;
-      case 'traces':
-        return <TracesScreen />;
-      case 'settings':
-        return <SettingsScreen agentConfig={agentConfig} />;
-      default:
-        return <ChatArea agentConfig={agentConfig} />;
-    }
-  };
-
   if (loading) {
     return (
       <div className="flex h-screen items-center justify-center">
@@ -229,7 +210,7 @@ export function MainLayout() {
       <div className="flex h-screen items-center justify-center">
         <div className="text-center">
           <p className="text-red-500 text-lg mb-4">Error: {error}</p>
-          <Button onClick={loadAgentConfig}>Retry</Button>
+          <Button onClick={() => loadAgentConfig(true)}>Retry</Button>
         </div>
       </div>
     );
@@ -313,7 +294,29 @@ export function MainLayout() {
       <main className="flex-1 overflow-auto">
         <div className="h-full overflow-y-auto">
           {isAuthenticated ? (
-            renderActiveScreen()
+            <div className="h-full">
+              <div className={activeScreen === 'chat' ? 'h-full' : 'hidden'}>
+                <ChatArea agentConfig={agentConfig} />
+              </div>
+              <div className={activeScreen === 'agent-info' ? 'h-full' : 'hidden'}>
+                <AgentInfoScreen agentConfig={agentConfig} />
+              </div>
+              <div className={activeScreen === 'tools' ? 'h-full' : 'hidden'}>
+                <ToolsScreen />
+              </div>
+              <div className={activeScreen === 'memory' ? 'h-full' : 'hidden'}>
+                <MemoryScreen />
+              </div>
+              <div className={activeScreen === 'sub-agents' ? 'h-full' : 'hidden'}>
+                <SubAgentsScreen />
+              </div>
+              <div className={activeScreen === 'traces' ? 'h-full' : 'hidden'}>
+                <TracesScreen />
+              </div>
+              <div className={activeScreen === 'settings' ? 'h-full' : 'hidden'}>
+                <SettingsScreen agentConfig={agentConfig} />
+              </div>
+            </div>
           ) : (
             <div className="flex h-full items-center justify-center">
               <div className="text-center space-y-2">
