@@ -16,6 +16,7 @@ import (
 	"github.com/Ingenimax/agent-sdk-go/pkg/logging"
 	"github.com/Ingenimax/agent-sdk-go/pkg/multitenancy"
 	"github.com/Ingenimax/agent-sdk-go/pkg/retry"
+	"github.com/aws/aws-sdk-go-v2/aws"
 )
 
 // AnthropicClient implements the LLM interface for Anthropic
@@ -28,6 +29,7 @@ type AnthropicClient struct {
 	retryExecutor       *retry.Executor
 	vertexRetryExecutor *VertexRetryExecutor
 	VertexConfig        *VertexConfig
+	BedrockConfig       *BedrockConfig
 }
 
 // Option represents an option for configuring the Anthropic client
@@ -201,6 +203,26 @@ func WithGoogleApplicationCredentials(region, projectID, credentialsContent stri
 	}
 }
 
+// WithBedrockAWSConfig configures Bedrock with an existing AWS config
+// This is useful when you have a pre-configured AWS config with custom settings
+func WithBedrockAWSConfig(awsConfig aws.Config) Option {
+	return func(c *AnthropicClient) {
+		ctx := context.Background()
+		bedrockConfig, err := NewBedrockConfigWithAWSConfig(ctx, awsConfig)
+		if err != nil {
+			c.logger.Error(ctx, "Failed to configure Bedrock with AWS config", map[string]interface{}{
+				"error":  err.Error(),
+				"region": awsConfig.Region,
+			})
+			return
+		}
+		c.BedrockConfig = bedrockConfig
+		c.logger.Info(ctx, "Configured client for AWS Bedrock with AWS config", map[string]interface{}{
+			"region": awsConfig.Region,
+		})
+	}
+}
+
 // NewClient creates a new Anthropic client
 func NewClient(apiKey string, options ...Option) *AnthropicClient {
 	// Create client with default options
@@ -246,18 +268,48 @@ const (
 	Claude3Opus    = "claude-3-opus-latest"
 	Claude37Sonnet = "claude-3-7-sonnet-20250219" // Supports thinking tokens
 	ClaudeSonnet4  = "claude-sonnet-4-20250514"   // Latest model with thinking
+	ClaudeSonnet45 = "claude-sonnet-4-5-20250929" // Latest Sonnet 4.5
 	ClaudeOpus4    = "claude-opus-4-20250514"     // Latest Opus with thinking
 	ClaudeOpus41   = "claude-opus-4-1-20250805"   // Latest Opus 4.1
+	ClaudeOpus45   = "claude-opus-4-5-20251101"   // Latest Opus 4.5
+
+	// AWS Bedrock model IDs
+	BedrockClaude35Haiku  = "anthropic.claude-3-5-haiku-20241022-v1:0"
+	BedrockClaude35Sonnet = "anthropic.claude-3-5-sonnet-20241022-v2:0"
+	BedrockClaude3Opus    = "anthropic.claude-3-opus-20240229-v1:0"
+	BedrockClaude37Sonnet = "anthropic.claude-3-7-sonnet-20250219-v1:0"
+	BedrockClaudeSonnet4  = "anthropic.claude-sonnet-4-20250514-v1:0"
+	BedrockClaudeSonnet45 = "anthropic.claude-sonnet-4-5-20250929-v1:0"
+	BedrockClaudeOpus4    = "anthropic.claude-opus-4-20250514-v1:0"
+	BedrockClaudeOpus41   = "anthropic.claude-opus-4-1-20250805-v1:0"
+	BedrockClaudeOpus45   = "anthropic.claude-opus-4-5-20251101-v1:0"
 )
 
 // SupportsThinking returns true if the model supports thinking tokens
 func SupportsThinking(model string) bool {
+	// Normalize the model name by removing regional prefixes and extracting base model
+	normalizedModel := model
+
+	// Handle Bedrock models with regional prefixes (us., eu., ap., etc.)
+	if strings.Contains(model, ".anthropic.claude") {
+		// Extract the part after ".anthropic." to get base model
+		parts := strings.SplitN(model, ".anthropic.", 2)
+		if len(parts) == 2 {
+			normalizedModel = parts[1] // e.g., "claude-3-7-sonnet-20250219-v1:0"
+		}
+	} else if strings.HasPrefix(model, "anthropic.claude") {
+		// Strip "anthropic." prefix for models without regional prefix
+		normalizedModel = strings.TrimPrefix(model, "anthropic.")
+	}
+
+	// List of base model patterns that support thinking
 	supportedModels := []string{
 		"claude-3-7-sonnet-20250219",
 		"claude-sonnet-4-20250514",
+		"claude-sonnet-4-5-20250929",
 		"claude-opus-4-20250514",
 		"claude-opus-4-1-20250805",
-		"claude-sonnet-4-5-20250929",
+		"claude-opus-4-5-20251101",
 		// Vertex AI format models
 		"claude-sonnet-4@20250514",
 		"claude-sonnet-4-v1@20250514",
@@ -265,10 +317,18 @@ func SupportsThinking(model string) bool {
 		"claude-opus-4@20250514",
 		"claude-opus-4-v1@20250514",
 		"claude-opus-4-1@20250805",
+		"claude-opus-4-5@20251101",
+		// AWS Bedrock base patterns (without regional prefix)
+		"claude-3-7-sonnet-20250219-v1:0",
+		"claude-sonnet-4-20250514-v1:0",
+		"claude-sonnet-4-5-20250929-v1:0",
+		"claude-opus-4-20250514-v1:0",
+		"claude-opus-4-1-20250805-v1:0",
+		"claude-opus-4-5-20251101-v1:0",
 	}
 
 	for _, supportedModel := range supportedModels {
-		if model == supportedModel {
+		if normalizedModel == supportedModel || model == supportedModel {
 			return true
 		}
 	}
@@ -353,8 +413,10 @@ type CompletionResponse struct {
 
 // Usage represents token usage information
 type Usage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens              int `json:"input_tokens"`
+	OutputTokens             int `json:"output_tokens"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
 }
 
 // WithReasoning creates a GenerateOption to set the reasoning mode
@@ -367,6 +429,52 @@ func WithReasoning(reasoning string) interfaces.GenerateOption {
 		}
 		options.LLMConfig.Reasoning = reasoning
 		// No actual functionality since reasoning is not supported
+	}
+}
+
+// WithCacheSystemMessage creates a GenerateOption to cache the system message.
+// The system message will have cache_control added, caching it for subsequent requests.
+func WithCacheSystemMessage() interfaces.GenerateOption {
+	return func(options *interfaces.GenerateOptions) {
+		if options.CacheConfig == nil {
+			options.CacheConfig = &interfaces.CacheConfig{}
+		}
+		options.CacheConfig.CacheSystemMessage = true
+	}
+}
+
+// WithCacheTools creates a GenerateOption to cache all tool definitions.
+// The cache_control is placed on the last tool, caching all tools as a prefix.
+func WithCacheTools() interfaces.GenerateOption {
+	return func(options *interfaces.GenerateOptions) {
+		if options.CacheConfig == nil {
+			options.CacheConfig = &interfaces.CacheConfig{}
+		}
+		options.CacheConfig.CacheTools = true
+	}
+}
+
+// WithCacheConversation creates a GenerateOption to cache conversation history.
+// The cache_control is placed on the last message from memory, so the entire
+// conversation prefix is cached. Each new turn just appends to the cached prefix.
+func WithCacheConversation() interfaces.GenerateOption {
+	return func(options *interfaces.GenerateOptions) {
+		if options.CacheConfig == nil {
+			options.CacheConfig = &interfaces.CacheConfig{}
+		}
+		options.CacheConfig.CacheConversation = true
+	}
+}
+
+// WithCacheTTL creates a GenerateOption to set the cache duration.
+// Valid values are "5m" (default, 5 minutes) or "1h" (1 hour).
+// The 1-hour cache has additional cost but is useful for longer sessions.
+func WithCacheTTL(ttl string) interfaces.GenerateOption {
+	return func(options *interfaces.GenerateOptions) {
+		if options.CacheConfig == nil {
+			options.CacheConfig = &interfaces.CacheConfig{}
+		}
+		options.CacheConfig.CacheTTL = ttl
 	}
 }
 
@@ -490,10 +598,22 @@ Return only the JSON object, with no additional text or markdown formatting.`, p
 
 	operation := func() error {
 		var apiType string
-		if c.VertexConfig != nil && c.VertexConfig.Enabled {
+		if c.BedrockConfig != nil && c.BedrockConfig.Enabled {
+			apiType = "bedrock"
+		} else if c.VertexConfig != nil && c.VertexConfig.Enabled {
 			apiType = "vertex"
 		} else {
 			apiType = "anthropic"
+		}
+
+		// Bedrock uses AWS SDK, not HTTP requests
+		if c.BedrockConfig != nil && c.BedrockConfig.Enabled {
+			bedrockResp, err := c.BedrockConfig.InvokeModel(ctx, c.Model, &req)
+			if err != nil {
+				return fmt.Errorf("failed to invoke Bedrock model: %w", err)
+			}
+			resp = *bedrockResp
+			return nil
 		}
 
 		var httpReq *http.Request
@@ -505,10 +625,24 @@ Return only the JSON object, with no additional text or markdown formatting.`, p
 			}
 		} else {
 			// Standard Anthropic API mode
-			// Convert request to JSON
-			reqBody, err := json.Marshal(req)
-			if err != nil {
-				return fmt.Errorf("failed to marshal request: %w", err)
+			// Convert request to JSON, using cache builder if caching is enabled
+			var reqBody []byte
+			cacheBuilder := newCacheRequestBuilder(params.CacheConfig)
+			if cacheBuilder.HasCacheOptions() {
+				cacheableReq, err := cacheBuilder.BuildCacheableRequest(&req)
+				if err != nil {
+					return fmt.Errorf("failed to build cacheable request: %w", err)
+				}
+				reqBody, err = json.Marshal(cacheableReq)
+				if err != nil {
+					return fmt.Errorf("failed to marshal cacheable request: %w", err)
+				}
+			} else {
+				var err error
+				reqBody, err = json.Marshal(req)
+				if err != nil {
+					return fmt.Errorf("failed to marshal request: %w", err)
+				}
 			}
 
 			httpReq, err = http.NewRequestWithContext(
@@ -596,9 +730,11 @@ Return only the JSON object, with no additional text or markdown formatting.`, p
 		Model:      resp.Model,
 		StopReason: resp.StopReason,
 		Usage: &interfaces.TokenUsage{
-			InputTokens:  resp.Usage.InputTokens,
-			OutputTokens: resp.Usage.OutputTokens,
-			TotalTokens:  resp.Usage.InputTokens + resp.Usage.OutputTokens,
+			InputTokens:              resp.Usage.InputTokens,
+			OutputTokens:             resp.Usage.OutputTokens,
+			TotalTokens:              resp.Usage.InputTokens + resp.Usage.OutputTokens,
+			CacheCreationInputTokens: resp.Usage.CacheCreationInputTokens,
+			CacheReadInputTokens:     resp.Usage.CacheReadInputTokens,
 		},
 		Metadata: map[string]interface{}{
 			"provider": "anthropic",
@@ -997,8 +1133,8 @@ func (c *AnthropicClient) GenerateWithTools(ctx context.Context, prompt string, 
 
 		// Define operation for retry mechanism
 		operation := func() error {
-			// Create HTTP request (supports both Vertex AI and standard Anthropic API)
-			httpReq, err := c.createHTTPRequest(ctx, &req, "/v1/messages")
+			// Create HTTP request (supports both Vertex AI and standard Anthropic API, with caching)
+			httpReq, err := c.createHTTPRequestWithCache(ctx, &req, "/v1/messages", params.CacheConfig)
 			if err != nil {
 				return fmt.Errorf("failed to create request (iteration %d): %w", iteration+1, err)
 			}
@@ -1442,15 +1578,34 @@ func (c *AnthropicClient) GenerateWithToolsDetailed(ctx context.Context, prompt 
 
 // createHTTPRequest creates an HTTP request for either Vertex AI or standard Anthropic API
 func (c *AnthropicClient) createHTTPRequest(ctx context.Context, req *CompletionRequest, path string) (*http.Request, error) {
+	return c.createHTTPRequestWithCache(ctx, req, path, nil)
+}
+
+// createHTTPRequestWithCache creates an HTTP request with optional cache support
+func (c *AnthropicClient) createHTTPRequestWithCache(ctx context.Context, req *CompletionRequest, path string, cacheConfig *interfaces.CacheConfig) (*http.Request, error) {
 	if c.VertexConfig != nil && c.VertexConfig.Enabled {
-		// Vertex AI mode
+		// Vertex AI mode - TODO: Add cache support for Vertex AI
 		return c.VertexConfig.CreateVertexHTTPRequest(ctx, req, "POST", path)
 	} else {
 		// Standard Anthropic API mode
-		// Convert request to JSON
-		reqBody, err := json.Marshal(req)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal request: %w", err)
+		// Convert request to JSON, using cache builder if caching is enabled
+		var reqBody []byte
+		cacheBuilder := newCacheRequestBuilder(cacheConfig)
+		if cacheBuilder.HasCacheOptions() {
+			cacheableReq, err := cacheBuilder.BuildCacheableRequest(req)
+			if err != nil {
+				return nil, fmt.Errorf("failed to build cacheable request: %w", err)
+			}
+			reqBody, err = json.Marshal(cacheableReq)
+			if err != nil {
+				return nil, fmt.Errorf("failed to marshal cacheable request: %w", err)
+			}
+		} else {
+			var err error
+			reqBody, err = json.Marshal(req)
+			if err != nil {
+				return nil, fmt.Errorf("failed to marshal request: %w", err)
+			}
 		}
 
 		// Create HTTP request
@@ -1475,18 +1630,39 @@ func (c *AnthropicClient) createHTTPRequest(ctx context.Context, req *Completion
 
 // createStreamingHTTPRequest creates an HTTP request for streaming, supporting both Vertex AI and standard API
 func (c *AnthropicClient) createStreamingHTTPRequest(ctx context.Context, req *CompletionRequest, path string) (*http.Request, error) {
+	return c.createStreamingHTTPRequestWithCache(ctx, req, path, nil)
+}
+
+// createStreamingHTTPRequestWithCache creates an HTTP request for streaming with optional cache support
+func (c *AnthropicClient) createStreamingHTTPRequestWithCache(ctx context.Context, req *CompletionRequest, path string, cacheConfig *interfaces.CacheConfig) (*http.Request, error) {
 	if c.VertexConfig != nil && c.VertexConfig.Enabled {
-		// Vertex AI mode
+		// Vertex AI mode - TODO: Add cache support for Vertex AI streaming
 		return c.VertexConfig.CreateVertexStreamingHTTPRequest(ctx, req, "POST", path)
 	} else {
 		// Standard Anthropic API mode
 		// Ensure streaming is enabled
 		req.Stream = true
 
-		// Convert request to JSON
-		reqBody, err := json.Marshal(req)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal request: %w", err)
+		// Convert request to JSON, using cache builder if caching is enabled
+		var reqBody []byte
+		cacheBuilder := newCacheRequestBuilder(cacheConfig)
+		if cacheBuilder.HasCacheOptions() {
+			cacheableReq, err := cacheBuilder.BuildCacheableRequest(req)
+			if err != nil {
+				return nil, fmt.Errorf("failed to build cacheable streaming request: %w", err)
+			}
+			// Ensure streaming is enabled in the cacheable request
+			cacheableReq.Stream = true
+			reqBody, err = json.Marshal(cacheableReq)
+			if err != nil {
+				return nil, fmt.Errorf("failed to marshal cacheable streaming request: %w", err)
+			}
+		} else {
+			var err error
+			reqBody, err = json.Marshal(req)
+			if err != nil {
+				return nil, fmt.Errorf("failed to marshal request: %w", err)
+			}
 		}
 
 		// Create HTTP request

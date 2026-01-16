@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -55,12 +56,31 @@ func (cache *LazyMCPServerCache) getOrCreateServer(ctx context.Context, config L
 		return server, nil
 	}
 
+	// Log environment variables being passed (masking sensitive values)
+	envDebug := make(map[string]string)
+	for _, envVar := range config.Env {
+		parts := strings.SplitN(envVar, "=", 2)
+		if len(parts) == 2 {
+			key := parts[0]
+			value := parts[1]
+			// Mask sensitive values (show first 10 chars for debugging)
+			if len(value) > 10 {
+				envDebug[key] = value[:10] + "..."
+			} else if value == "" {
+				envDebug[key] = "<EMPTY>"
+			} else {
+				envDebug[key] = value
+			}
+		}
+	}
+
 	cache.logger.Info(ctx, "Initializing MCP server on demand", map[string]interface{}{
 		"server_name": config.Name,
 		"server_type": config.Type,
 		"command":     config.Command,
 		"args":        config.Args,
 		"env_count":   len(config.Env),
+		"env_vars":    envDebug,
 	})
 
 	var server interfaces.MCPServer
@@ -75,8 +95,9 @@ func (cache *LazyMCPServerCache) getOrCreateServer(ctx context.Context, config L
 		})
 	case "http":
 		server, err = NewHTTPServer(ctx, HTTPServerConfig{
-			BaseURL: config.URL,
-			Token:   config.Token,
+			BaseURL:      config.URL,
+			Token:        config.Token,
+			ProtocolType: ServerProtocolType(config.HttpTransportMode),
 		})
 	default:
 		return nil, fmt.Errorf("unsupported MCP server type: %s", config.Type)
@@ -146,13 +167,15 @@ func (cache *LazyMCPServerCache) getOrCreateServer(ctx context.Context, config L
 
 // LazyMCPServerConfig holds configuration for creating an MCP server on demand
 type LazyMCPServerConfig struct {
-	Name    string
-	Type    string // "stdio" or "http"
-	Command string
-	Args    []string
-	Env     []string
-	URL     string
-	Token   string // Bearer token for HTTP authentication
+	Name              string
+	Type              string // "stdio" or "http"
+	Command           string
+	Args              []string
+	Env               []string
+	URL               string
+	Token             string   // Bearer token for HTTP authentication
+	HttpTransportMode string   // "sse" or "streamable"
+	AllowedTools      []string // List of allowed tool names for this MCP server
 }
 
 // LazyMCPTool is a tool that initializes its MCP server on first use
@@ -288,39 +311,69 @@ func (t *LazyMCPTool) Run(ctx context.Context, input string) (string, error) {
 	}
 
 	// Log the tool call for debugging
-	t.logger.Debug(ctx, "Calling MCP tool", map[string]interface{}{
+	t.logger.Info(ctx, "[MCP TOOL CALL] Calling MCP tool", map[string]interface{}{
 		"tool_name":   t.name,
 		"args":        args,
 		"server_name": t.serverConfig.Name,
 		"server_type": t.serverConfig.Type,
+		"command":     t.serverConfig.Command,
+		"env_count":   len(t.serverConfig.Env),
 	})
+
+	// Log environment variables being used (sanitized)
+	for _, envVar := range t.serverConfig.Env {
+		// Only log first 50 chars to avoid exposing full secrets
+		if len(envVar) > 50 {
+			t.logger.Debug(ctx, "[MCP ENV] Server environment variable", map[string]interface{}{
+				"env_var": envVar[:50] + "...",
+			})
+		} else {
+			t.logger.Debug(ctx, "[MCP ENV] Server environment variable", map[string]interface{}{
+				"env_var": envVar,
+			})
+		}
+	}
 
 	// Call the tool on the MCP server
 	resp, err := server.CallTool(ctx, t.name, args)
 	if err != nil {
-		t.logger.Error(ctx, "MCP tool call failed", map[string]interface{}{
-			"tool_name": t.name,
-			"error":     err.Error(),
+		t.logger.Error(ctx, "[MCP TOOL ERROR] MCP tool call failed with error", map[string]interface{}{
+			"tool_name":   t.name,
+			"server_name": t.serverConfig.Name,
+			"error":       err.Error(),
+			"error_type":  fmt.Sprintf("%T", err),
 		})
 		return "", fmt.Errorf("MCP server call failed: %v", err)
 	}
 
-	// Log the response for debugging
-	t.logger.Debug(ctx, "Received MCP tool response", map[string]interface{}{
-		"tool_name": t.name,
-		"is_error":  resp.IsError,
-		"content":   resp.Content,
+	// Log the full response for debugging
+	t.logger.Info(ctx, "[MCP TOOL RESPONSE] Received MCP tool response", map[string]interface{}{
+		"tool_name":    t.name,
+		"server_name":  t.serverConfig.Name,
+		"is_error":     resp.IsError,
+		"content":      resp.Content,
+		"content_type": fmt.Sprintf("%T", resp.Content),
 	})
 
 	// Handle error response
 	if resp.IsError {
-		// Better error content handling
+		// Better error content handling with detailed logging
 		var errorMsg string
 		switch content := resp.Content.(type) {
 		case string:
 			errorMsg = content
+			t.logger.Error(ctx, "[MCP TOOL ERROR] MCP server returned error (string)", map[string]interface{}{
+				"tool_name":   t.name,
+				"server_name": t.serverConfig.Name,
+				"error":       content,
+			})
 		case []byte:
 			errorMsg = string(content)
+			t.logger.Error(ctx, "[MCP TOOL ERROR] MCP server returned error (bytes)", map[string]interface{}{
+				"tool_name":   t.name,
+				"server_name": t.serverConfig.Name,
+				"error":       errorMsg,
+			})
 		case map[string]interface{}:
 			if msg, ok := content["message"].(string); ok {
 				errorMsg = msg
@@ -329,14 +382,41 @@ func (t *LazyMCPTool) Run(ctx context.Context, input string) (string, error) {
 			} else {
 				errorMsg = fmt.Sprintf("%v", content)
 			}
+			t.logger.Error(ctx, "[MCP TOOL ERROR] MCP server returned error (map)", map[string]interface{}{
+				"tool_name":      t.name,
+				"server_name":    t.serverConfig.Name,
+				"error_content":  content,
+				"parsed_message": errorMsg,
+			})
+		case []interface{}:
+			// Handle array content (like MCP Content array)
+			if bytes, err := json.Marshal(content); err == nil {
+				errorMsg = string(bytes)
+			} else {
+				errorMsg = fmt.Sprintf("%v", content)
+			}
+			t.logger.Error(ctx, "[MCP TOOL ERROR] MCP server returned error (array)", map[string]interface{}{
+				"tool_name":     t.name,
+				"server_name":   t.serverConfig.Name,
+				"error_content": content,
+				"parsed_error":  errorMsg,
+				"array_length":  len(content),
+			})
 		default:
 			if bytes, err := json.Marshal(content); err == nil {
 				errorMsg = string(bytes)
 			} else {
 				errorMsg = fmt.Sprintf("%v", content)
 			}
+			t.logger.Error(ctx, "[MCP TOOL ERROR] MCP server returned error (unknown type)", map[string]interface{}{
+				"tool_name":   t.name,
+				"server_name": t.serverConfig.Name,
+				"error_type":  fmt.Sprintf("%T", content),
+				"error":       errorMsg,
+				"raw_content": content,
+			})
 		}
-		return "", fmt.Errorf("MCP tool error: %s", errorMsg)
+		return "", fmt.Errorf("MCP tool error from server '%s': %s", t.serverConfig.Name, errorMsg)
 	}
 
 	// Convert successful response to string

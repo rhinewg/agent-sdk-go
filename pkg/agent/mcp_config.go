@@ -15,11 +15,13 @@ import (
 
 // MCPServerConfig represents a single MCP server configuration
 type MCPServerConfig struct {
-	Command string            `json:"command,omitempty" yaml:"command,omitempty"`
-	Args    []string          `json:"args,omitempty" yaml:"args,omitempty"`
-	Env     map[string]string `json:"env,omitempty" yaml:"env,omitempty"`
-	URL     string            `json:"url,omitempty" yaml:"url,omitempty"`
-	Token   string            `json:"token,omitempty" yaml:"token,omitempty"`
+	Command           string            `json:"command,omitempty" yaml:"command,omitempty"`
+	Args              []string          `json:"args,omitempty" yaml:"args,omitempty"`
+	Env               map[string]string `json:"env,omitempty" yaml:"env,omitempty"`
+	URL               string            `json:"url,omitempty" yaml:"url,omitempty"`
+	Token             string            `json:"token,omitempty" yaml:"token,omitempty"`
+	HttpTransportMode string            `json:"httpTransportMode,omitempty" yaml:"httpTransportMode,omitempty"` // "sse" or "streamable"
+	AllowedTools      []string          `json:"allowedTools,omitempty" yaml:"allowedTools,omitempty"`
 }
 
 // MCPDiscoveredServerInfo represents metadata discovered from the server at runtime
@@ -107,7 +109,8 @@ func WithMCPConfigFromJSON(filePath string) Option {
 		}
 
 		fmt.Printf("MCP Config loaded from JSON: %s\n", filePath)
-		applyMCPConfig(a, config)
+		// No configVars available from file loading, pass empty map
+		applyMCPConfig(a, config, make(map[string]string))
 	}
 }
 
@@ -119,19 +122,22 @@ func WithMCPConfigFromYAML(filePath string) Option {
 			return
 		}
 
-		applyMCPConfig(a, config)
+		// No configVars available from file loading, pass empty map
+		applyMCPConfig(a, config, make(map[string]string))
 	}
 }
 
 // WithMCPConfig adds MCP servers from configuration object
 func WithMCPConfig(config *MCPConfiguration) Option {
 	return func(a *Agent) {
-		applyMCPConfig(a, config)
+		// No configVars available from direct config, pass empty map
+		applyMCPConfig(a, config, make(map[string]string))
 	}
 }
 
 // applyMCPConfig applies MCP configuration to an agent
-func applyMCPConfig(a *Agent, config *MCPConfiguration) {
+// configVars contains variables from ConfigSource (config service) for expansion
+func applyMCPConfig(a *Agent, config *MCPConfiguration, configVars map[string]string) {
 	if config == nil {
 		return
 	}
@@ -240,22 +246,22 @@ func applyMCPConfig(a *Agent, config *MCPConfiguration) {
 			builder.AddStdioServer(serverName, serverConfig.Command, serverConfig.Args...)
 
 			// Convert environment map to string slice format
-			// Resolve environment variable placeholders (e.g., ${VAR_NAME})
+			// Resolve environment variable placeholders using configVars first, then OS env
 			var envSlice []string
 			for key, value := range serverConfig.Env {
-				// Expand environment variables in the value
-				resolvedValue := os.ExpandEnv(value)
+				// Use expandWithConfigVars to check ConfigSource variables first, then OS env
+				resolvedValue := expandWithConfigVars(value, configVars)
 				envSlice = append(envSlice, fmt.Sprintf("%s=%s", key, resolvedValue))
-
 			}
 
 			lazyConfig := LazyMCPConfig{
-				Name:    serverName,
-				Type:    "stdio",
-				Command: serverConfig.Command,
-				Args:    serverConfig.Args,
-				Env:     envSlice,
-				Tools:   []LazyMCPToolConfig{}, // Will discover dynamically
+				Name:         serverName,
+				Type:         "stdio",
+				Command:      serverConfig.Command,
+				Args:         serverConfig.Args,
+				Env:          envSlice,
+				Tools:        []LazyMCPToolConfig{}, // Will discover dynamically
+				AllowedTools: serverConfig.AllowedTools,
 			}
 			lazyConfigs = append(lazyConfigs, lazyConfig)
 
@@ -267,11 +273,18 @@ func applyMCPConfig(a *Agent, config *MCPConfiguration) {
 			}
 
 			lazyConfig := LazyMCPConfig{
-				Name:  serverName,
-				Type:  "http",
-				URL:   serverConfig.URL,
-				Token: serverConfig.Token,    // Preserve token for lazy initialization
-				Tools: []LazyMCPToolConfig{}, // Will discover dynamically
+				Name:         serverName,
+				Type:         "http",
+				URL:          serverConfig.URL,
+				Token:        serverConfig.Token,    // Preserve token for lazy initialization
+				Tools:        []LazyMCPToolConfig{}, // Will discover dynamically
+				AllowedTools: serverConfig.AllowedTools,
+			}
+			if serverConfig.HttpTransportMode != "" {
+				// handle case-insensitivity
+				lazyConfig.HttpTransportMode = strings.ToLower(serverConfig.HttpTransportMode)
+			} else {
+				lazyConfig.HttpTransportMode = "sse" // Default to sse
 			}
 			lazyConfigs = append(lazyConfigs, lazyConfig)
 
@@ -391,6 +404,12 @@ func ValidateMCPConfig(config *MCPConfiguration) error {
 		case "http":
 			if server.URL == "" {
 				return fmt.Errorf("server %s: url is required for http type", serverName)
+			}
+		}
+
+		if server.URL != "" && server.HttpTransportMode != "" {
+			if !strings.EqualFold(server.HttpTransportMode, "sse") || !strings.EqualFold(server.HttpTransportMode, "streamable") {
+				return fmt.Errorf("server %s: invalid httpTransportMode '%s', must be 'sse' or 'streamable'", serverName, server.HttpTransportMode)
 			}
 		}
 	}
