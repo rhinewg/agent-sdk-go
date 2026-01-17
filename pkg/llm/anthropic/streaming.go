@@ -445,6 +445,8 @@ func (c *AnthropicClient) executeStreamingWithTools(
 
 	gotCompleteResponse := false
 	finalIterationCount := 0 // Track total iterations for logging after loop
+	// Track if we have executed any tool calls in previous iterations
+	hasExecutedToolCalls := false
 
 	// Iterative tool calling loop
 	for iteration := 0; iteration < maxIterations; iteration++ {
@@ -520,48 +522,68 @@ func (c *AnthropicClient) executeStreamingWithTools(
 
 		// If no tool calls, check if we have content
 		if len(toolCalls) == 0 {
-			// If we have content, we're done with iterations - the model provided a final response
+			// If we have content, check if this is a complete response or intermediate content
 			if hasContent {
-				c.logger.Info(ctx, "[LLM RESPONSE DEBUG] Got final content response without tool calls", map[string]interface{}{
-					"iteration":      iteration + 1,
-					"hasContent":     hasContent,
-					"responseType":   "final_answer",
-					"toolCallsCount": 0,
-					"capturedEvents": len(capturedContentEvents),
-				})
-
-				// Only replay if content was filtered (not already forwarded)
-				if filterContentDeltas {
-					// Replay the captured content events to stream the final response
-					c.logger.Debug(ctx, "[LLM RESPONSE DEBUG] Replaying captured content events", map[string]interface{}{
-						"iteration":   iteration + 1,
-						"eventsCount": len(capturedContentEvents),
+				// Only consider this a complete response if we haven't executed any tool calls before
+				if !hasExecutedToolCalls {
+					// This is a complete response without any tool calls
+					c.logger.Info(ctx, "[LLM RESPONSE DEBUG] Got final content response without tool calls", map[string]interface{}{
+						"iteration":      iteration + 1,
+						"hasContent":     hasContent,
+						"responseType":   "final_answer",
+						"toolCallsCount": 0,
+						"capturedEvents": len(capturedContentEvents),
 					})
 
-					for _, contentEvent := range capturedContentEvents {
-						select {
-						case eventChan <- contentEvent:
-						case <-ctx.Done():
-							return ctx.Err()
+					// Only replay if content was filtered (not already forwarded)
+					if filterContentDeltas {
+						// Replay the captured content events to stream the final response
+						c.logger.Debug(ctx, "[LLM RESPONSE DEBUG] Replaying captured content events", map[string]interface{}{
+							"iteration":   iteration + 1,
+							"eventsCount": len(capturedContentEvents),
+						})
+
+						for _, contentEvent := range capturedContentEvents {
+							select {
+							case eventChan <- contentEvent:
+							case <-ctx.Done():
+								return ctx.Err()
+							}
 						}
 					}
-				}
 
-				// Send completion event
-				select {
-				case eventChan <- interfaces.StreamEvent{
-					Type:      interfaces.StreamEventContentComplete,
-					Timestamp: time.Now(),
-					Metadata: map[string]interface{}{
-						"iteration": iteration + 1,
-					},
-				}:
-				case <-ctx.Done():
-					return ctx.Err()
+					// Send completion event
+					select {
+					case eventChan <- interfaces.StreamEvent{
+						Type:      interfaces.StreamEventContentComplete,
+						Timestamp: time.Now(),
+						Metadata: map[string]interface{}{
+							"iteration": iteration + 1,
+						},
+					}:
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+					// Mark that we got a complete response
+					gotCompleteResponse = true
+					// Break out of iteration loop (don't return - let final synthesis check happen)
+					break
 				}
-				// Mark that we got a complete response
-				gotCompleteResponse = true
-				// Break out of iteration loop (don't return - let final synthesis check happen)
+				// If we have executed tool calls before, this is just intermediate content
+				// Add assistant message to conversation and continue to final synthesis call
+				var assistantContent strings.Builder
+				for _, event := range capturedContentEvents {
+					if event.Type == interfaces.StreamEventContentDelta {
+						assistantContent.WriteString(event.Content)
+					}
+				}
+				if strings.TrimSpace(assistantContent.String()) != "" {
+					messages = append(messages, Message{
+						Role:    "assistant",
+						Content: assistantContent.String(),
+					})
+				}
+				// Break to proceed to final synthesis call
 				break
 			}
 			// If no tool calls and no content, log warning and continue to next iteration
@@ -585,6 +607,9 @@ func (c *AnthropicClient) executeStreamingWithTools(
 			"iteration":    iteration + 1,
 			"responseType": "tool_calls",
 		})
+
+		// Mark that we have tool calls to execute
+		hasExecutedToolCalls = true
 
 		// Add assistant message to conversation history (matching non-streaming behavior)
 		// Build assistant content from captured events

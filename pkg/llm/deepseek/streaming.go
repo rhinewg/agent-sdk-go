@@ -362,6 +362,8 @@ func (c *DeepSeekClient) GenerateWithToolsStream(
 
 		// Track if we got a complete response (no tool calls)
 		gotCompleteResponse := false
+		// Track if we have executed any tool calls in previous iterations
+		hasExecutedToolCalls := false
 
 		// Iterative tool calling loop
 		for iteration := 0; iteration < maxIterations; iteration++ {
@@ -571,18 +573,32 @@ func (c *DeepSeekClient) GenerateWithToolsStream(
 
 			// Check if the model wants to use tools
 			if len(assistantResponse.ToolCalls) == 0 {
-				// No tool calls, we're done
-				if hasContent {
-					eventChan <- interfaces.StreamEvent{
-						Type:      interfaces.StreamEventContentComplete,
-						Timestamp: time.Now(),
-						Metadata: map[string]interface{}{
-							"iteration": iteration + 1,
-						},
+				// No tool calls in this iteration
+				// Only consider this a complete response if:
+				// 1. This is the first iteration (no tools were called before), OR
+				// 2. We haven't executed any tool calls in previous iterations
+				if !hasExecutedToolCalls {
+					// This is a complete response without any tool calls
+					if hasContent {
+						eventChan <- interfaces.StreamEvent{
+							Type:      interfaces.StreamEventContentComplete,
+							Timestamp: time.Now(),
+							Metadata: map[string]interface{}{
+								"iteration": iteration + 1,
+							},
+						}
 					}
+					gotCompleteResponse = true
+					break // Exit the iteration loop
 				}
-				gotCompleteResponse = true
-				break // Exit the iteration loop
+				// If we have executed tool calls before, this is just intermediate content
+				// Continue to final synthesis call even if no new tool calls
+				if hasContent {
+					// Add the assistant's message with content to the conversation
+					messages = append(messages, assistantResponse)
+				}
+				// Break to proceed to final synthesis call
+				break
 			}
 
 			// The model wants to use tools
@@ -593,6 +609,9 @@ func (c *DeepSeekClient) GenerateWithToolsStream(
 
 			// Add the assistant's message with tool calls to the conversation
 			messages = append(messages, assistantResponse)
+
+			// Mark that we have tool calls to execute
+			hasExecutedToolCalls = true
 
 			// Process each tool call
 			for _, toolCall := range assistantResponse.ToolCalls {
