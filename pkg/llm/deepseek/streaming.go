@@ -578,8 +578,16 @@ func (c *DeepSeekClient) GenerateWithToolsStream(
 				// 1. This is the first iteration (no tools were called before), OR
 				// 2. We haven't executed any tool calls in previous iterations
 				if !hasExecutedToolCalls {
-					// This is a complete response without any tool calls
+					// Treat as complete only if we actually got content.
+					// If the model returns an empty response when tools are enabled, we must
+					// fall back to the final synthesis call.
 					if hasContent {
+						// If we buffered content due to intermediate filtering, replay it now.
+						if filterIntermediateContent && len(iterationContentEvents) > 0 {
+							for _, contentEvent := range iterationContentEvents {
+								eventChan <- contentEvent
+							}
+						}
 						eventChan <- interfaces.StreamEvent{
 							Type:      interfaces.StreamEventContentComplete,
 							Timestamp: time.Now(),
@@ -587,8 +595,13 @@ func (c *DeepSeekClient) GenerateWithToolsStream(
 								"iteration": iteration + 1,
 							},
 						}
+						gotCompleteResponse = true
+					} else {
+						c.logger.Warn(ctx, "No tool calls and no content in iteration; falling back to final synthesis call", map[string]interface{}{
+							"iteration":     iteration + 1,
+							"maxIterations": maxIterations,
+						})
 					}
-					gotCompleteResponse = true
 					break // Exit the iteration loop
 				}
 				// If we have executed tool calls before, this is just intermediate content
