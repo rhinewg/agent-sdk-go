@@ -21,6 +21,7 @@ func main() {
 	fmt.Println()
 	fmt.Printf("Using LLM: %s\n", shared.GetProviderInfo())
 
+	agent.LoadEnvFile(".env")
 	apiKey := agent.GetEnvValue("OPENAI_API_KEY")
 	if apiKey == "" {
 		log.Fatal("OPENAI_API_KEY environment variable is required")
