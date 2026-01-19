@@ -51,6 +51,7 @@ export function ChatArea({ agentConfig }: ChatAreaProps) {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
 
   const stringifyMaybe = (val: unknown) => {
     if (val === undefined || val === null) return undefined;
@@ -489,36 +490,6 @@ export function ChatArea({ agentConfig }: ChatAreaProps) {
                 </div>
 
                 <div className="flex items-center space-x-2">
-                  <Label htmlFor="image-upload" className="text-xs">Image:</Label>
-                  <input
-                    id="image-upload"
-                    type="file"
-                    accept="image/*"
-                    multiple
-                    disabled={isLoading}
-                    className="text-xs"
-                    onChange={(e) => {
-                      void handleImageFiles(e.target.files);
-                      // allow selecting the same file again
-                      e.currentTarget.value = '';
-                    }}
-                  />
-                  {pendingImages.length > 0 && (
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      className="h-7 px-2 text-xs"
-                      disabled={isLoading}
-                      onClick={() => setPendingImages([])}
-                      title="Clear attached images"
-                    >
-                      Clear ({pendingImages.length})
-                    </Button>
-                  )}
-                </div>
-
-                <div className="flex items-center space-x-2">
                   <Building2 className="h-3 w-3 text-muted-foreground" />
                   <Label htmlFor="org-id" className="text-xs">Org:</Label>
                   <Input
@@ -570,7 +541,7 @@ export function ChatArea({ agentConfig }: ChatAreaProps) {
                 </Button>
                 <Button
                   onClick={sendMessage}
-                  disabled={(!input.trim() && pendingImages.length === 0) || isLoading}
+                  disabled={(!input.trim() && pendingImages.length === 0 && !(uploadEnabled && uploadedFile)) || isLoading}
                   size="sm"
                 >
                   {isLoading ? (
@@ -601,11 +572,63 @@ export function ChatArea({ agentConfig }: ChatAreaProps) {
                   </span>
                 )}
               </div>
-              <div className="flex-1">
-                <FileTransfer
-                  enabled={uploadEnabled && !isLoading}
-                  onUploaded={(info) => setUploadedFile(info)}
+              <div className="flex flex-1 items-start justify-end gap-4">
+                {/* Hidden image input (triggered by button) */}
+                <input
+                  ref={imageInputRef}
+                  id="image-upload"
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  disabled={isLoading}
+                  className="hidden"
+                  onChange={(e) => {
+                    void handleImageFiles(e.target.files);
+                    // allow selecting the same file again
+                    e.currentTarget.value = '';
+                  }}
                 />
+
+                {/* Image attach controls */}
+                <div className="flex items-center gap-2">
+                  <Label htmlFor="image-upload" className="text-xs">图片:</Label>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-8 px-2 text-xs"
+                    disabled={isLoading}
+                    onClick={() => imageInputRef.current?.click()}
+                  >
+                    选择图片
+                  </Button>
+                  {pendingImages.length > 0 && (
+                    <>
+                      <span className="text-xs text-muted-foreground">
+                        已选 {pendingImages.length} 张
+                      </span>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-8 px-2 text-xs"
+                        disabled={isLoading}
+                        onClick={() => setPendingImages([])}
+                        title="Clear attached images"
+                      >
+                        清空
+                      </Button>
+                    </>
+                  )}
+                </div>
+
+                {/* File transfer controls */}
+                <div className="flex-1">
+                  <FileTransfer
+                    enabled={uploadEnabled && !isLoading}
+                    onUploaded={(info) => setUploadedFile(info)}
+                  />
+                </div>
               </div>
             </div>
           </div>
