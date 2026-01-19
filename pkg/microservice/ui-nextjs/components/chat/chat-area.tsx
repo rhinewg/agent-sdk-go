@@ -200,7 +200,10 @@ export function ChatArea({ agentConfig }: ChatAreaProps) {
 
     const userMessage: ChatMessage = {
       role: 'user',
-      content: userVisibleContent,
+      // Preserve the real payload (including uploaded file metadata) in `content`
+      // while showing a friendlier version in the UI.
+      content: payloadContent,
+      display_content: userVisibleContent,
       timestamp: Date.now(),
       id: `msg_${Date.now()}_user`,
     };

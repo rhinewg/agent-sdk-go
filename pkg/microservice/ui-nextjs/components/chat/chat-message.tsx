@@ -121,7 +121,7 @@ export function ChatMessage({ message }: ChatMessageProps) {
                   ),
                 }}
               >
-                {message.content}
+                {message.display_content ?? message.content}
               </ReactMarkdown>
             </div>
           </CardContent>

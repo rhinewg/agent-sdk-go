@@ -148,6 +148,14 @@ export interface MemoryResponse {
 export interface ChatMessage {
   role: 'user' | 'assistant' | 'system';
   content: string;
+  /**
+   * Optional UI-only content to render in chat bubbles.
+   * When present, the UI should render this instead of `content`.
+   * This is useful for keeping `content` as the actual payload sent to the server
+   * (e.g. containing `[uploaded_file]` metadata) while displaying a friendlier
+   * version that doesn't leak absolute paths.
+   */
+  display_content?: string;
   timestamp: number;
   id?: string;
 }
