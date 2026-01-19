@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useRef, useEffect } from 'react';
-import { AgentConfig, ChatMessage } from '@/types/agent';
+import { AgentConfig, ChatMessage, ContentPart } from '@/types/agent';
 import { agentAPI } from '@/lib/api';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -37,6 +37,7 @@ export function ChatArea({ agentConfig }: ChatAreaProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [pendingImages, setPendingImages] = useState<Array<{ name: string; url: string; size: number }>>([]);
   const [conversationId, setConversationId] = useState<string>('');
   const [organizationId, setOrganizationId] = useState<string>('');
   const [charCount, setCharCount] = useState(0);
@@ -98,6 +99,68 @@ export function ChatArea({ agentConfig }: ChatAreaProps) {
     setMessages(prev => [...prev, message]);
   };
 
+  const readFileAsDataURL = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = () => reject(new Error('Failed to read file'));
+      reader.readAsDataURL(file);
+    });
+  };
+
+  const handleImageFiles = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+
+    const maxImageBytes = 20 * 1024 * 1024; // keep aligned with server default (20MB)
+    const newItems: Array<{ name: string; url: string; size: number }> = [];
+
+    for (const file of Array.from(files)) {
+      if (!file.type.startsWith('image/')) {
+        addMessage({
+          role: 'assistant',
+          content: `Error: Unsupported file type: ${file.type || file.name}`,
+          timestamp: Date.now(),
+          id: `msg_${Date.now()}_error`,
+        });
+        continue;
+      }
+      if (file.size > maxImageBytes) {
+        addMessage({
+          role: 'assistant',
+          content: `Error: Image too large: ${file.name} (${file.size} bytes, max ${maxImageBytes})`,
+          timestamp: Date.now(),
+          id: `msg_${Date.now()}_error`,
+        });
+        continue;
+      }
+
+      try {
+        const url = await readFileAsDataURL(file);
+        if (!url.startsWith('data:image/')) {
+          addMessage({
+            role: 'assistant',
+            content: `Error: Invalid image data URL for: ${file.name}`,
+            timestamp: Date.now(),
+            id: `msg_${Date.now()}_error`,
+          });
+          continue;
+        }
+        newItems.push({ name: file.name, url, size: file.size });
+      } catch (err) {
+        addMessage({
+          role: 'assistant',
+          content: `Error: Failed to read image: ${file.name}`,
+          timestamp: Date.now(),
+          id: `msg_${Date.now()}_error`,
+        });
+      }
+    }
+
+    if (newItems.length > 0) {
+      setPendingImages(prev => [...prev, ...newItems]);
+    }
+  };
+
   const updateLastMessage = (content: string) => {
     setMessages(prev => {
       const newMessages = [...prev];
@@ -112,27 +175,39 @@ export function ChatArea({ agentConfig }: ChatAreaProps) {
   };
 
   const sendMessage = async () => {
-    if (!input.trim() || isLoading) return;
+    const inputTrimmed = input.trim();
+    const hasUploadedFile = Boolean(uploadEnabled && uploadedFile);
+    if ((!inputTrimmed && pendingImages.length === 0 && !hasUploadedFile) || isLoading) return;
+
+    const baseVisibleContent =
+      inputTrimmed || (pendingImages.length > 0 ? `[sent ${pendingImages.length} image(s)]` : '');
+    const userVisibleContent = hasUploadedFile
+      ? (baseVisibleContent
+          ? `${baseVisibleContent}\n\n[file]: ${uploadedFile!.name}`
+          : `[sent file: ${uploadedFile!.name}]`)
+      : baseVisibleContent;
 
     // 清空上一轮的思考步骤和工具调用展示
     setThinkingSteps([]);
     setToolCalls([]);
 
     // 拼接上传文件信息到内容，作为参数传递（使用服务器绝对路径）
-    const payloadContent =
-      uploadEnabled && uploadedFile
-        ? `${input.trim()}\n\n[uploaded_file]: name=${uploadedFile.name}, path=${uploadedFile.absolutePath}`
-        : input.trim();
+    const payloadContent = (() => {
+      if (!hasUploadedFile) return inputTrimmed;
+      const fileMeta = `[uploaded_file]: name=${uploadedFile!.name}, path=${uploadedFile!.absolutePath}`;
+      return inputTrimmed ? `${inputTrimmed}\n\n${fileMeta}` : fileMeta;
+    })();
 
     const userMessage: ChatMessage = {
       role: 'user',
-      content: payloadContent,
+      content: userVisibleContent,
       timestamp: Date.now(),
       id: `msg_${Date.now()}_user`,
     };
 
     addMessage(userMessage);
     setInput('');
+    setPendingImages([]);
     setIsLoading(true);
 
     // Generate conversation ID if not exists
@@ -142,6 +217,17 @@ export function ChatArea({ agentConfig }: ChatAreaProps) {
     }
 
     try {
+      const contentParts: ContentPart[] = [];
+      if (payloadContent) {
+        contentParts.push({ type: 'text', text: payloadContent });
+      }
+      for (const img of pendingImages) {
+        contentParts.push({
+          type: 'image_url',
+          image_url: { url: img.url, detail: 'auto' },
+        });
+      }
+
       if (streamingEnabled) {
         // Streaming response
         const assistantMessage: ChatMessage = {
@@ -153,7 +239,8 @@ export function ChatArea({ agentConfig }: ChatAreaProps) {
         addMessage(assistantMessage);
 
         const stream = agentAPI.streamAgent({
-          input: userMessage.content,
+          input: payloadContent,
+          content_parts: contentParts.length > 0 ? contentParts : undefined,
           conversation_id: currentConversationId,
           org_id: organizationId || undefined,
         });
@@ -211,7 +298,8 @@ export function ChatArea({ agentConfig }: ChatAreaProps) {
       } else {
         // Non-streaming response
         const response = await agentAPI.runAgent({
-          input: userMessage.content,
+          input: payloadContent,
+          content_parts: contentParts.length > 0 ? contentParts : undefined,
           conversation_id: currentConversationId,
           org_id: organizationId || undefined,
         });
@@ -398,6 +486,36 @@ export function ChatArea({ agentConfig }: ChatAreaProps) {
                 </div>
 
                 <div className="flex items-center space-x-2">
+                  <Label htmlFor="image-upload" className="text-xs">Image:</Label>
+                  <input
+                    id="image-upload"
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    disabled={isLoading}
+                    className="text-xs"
+                    onChange={(e) => {
+                      void handleImageFiles(e.target.files);
+                      // allow selecting the same file again
+                      e.currentTarget.value = '';
+                    }}
+                  />
+                  {pendingImages.length > 0 && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-7 px-2 text-xs"
+                      disabled={isLoading}
+                      onClick={() => setPendingImages([])}
+                      title="Clear attached images"
+                    >
+                      Clear ({pendingImages.length})
+                    </Button>
+                  )}
+                </div>
+
+                <div className="flex items-center space-x-2">
                   <Building2 className="h-3 w-3 text-muted-foreground" />
                   <Label htmlFor="org-id" className="text-xs">Org:</Label>
                   <Input
@@ -449,7 +567,7 @@ export function ChatArea({ agentConfig }: ChatAreaProps) {
                 </Button>
                 <Button
                   onClick={sendMessage}
-                  disabled={!input.trim() || isLoading}
+                  disabled={(!input.trim() && pendingImages.length === 0) || isLoading}
                   size="sm"
                 >
                   {isLoading ? (
