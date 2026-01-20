@@ -756,6 +756,36 @@ func (a *Agent) Run(ctx context.Context, input string) (string, error) {
 	return response.Content, nil
 }
 
+// RunDefault runs the agent with the given input using the default behavior
+// (ignores any customRunFunc).
+//
+// This is intended for orchestrators that implement a custom Run and still need
+// to call the built-in execution without causing recursion.
+func (a *Agent) RunDefault(ctx context.Context, input string) (string, error) {
+	startTime := time.Now()
+
+	tracker := newUsageTracker(false)
+	ctx = withUsageTracker(ctx, tracker)
+
+	var response string
+	var err error
+
+	if a.isRemote {
+		response, err = a.runRemoteWithTracking(ctx, input)
+		if err != nil {
+			return "", err
+		}
+	} else {
+		response, err = a.runLocalWithTracking(ctx, input)
+		if err != nil {
+			return "", err
+		}
+	}
+
+	tracker.setExecutionTime(time.Since(startTime).Milliseconds())
+	return response, nil
+}
+
 func (a *Agent) RunDetailed(ctx context.Context, input string) (*interfaces.AgentResponse, error) {
 	return a.runInternal(ctx, input, true)
 }

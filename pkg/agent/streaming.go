@@ -29,6 +29,20 @@ func (a *Agent) RunStream(ctx context.Context, input string) (<-chan interfaces.
 	return a.runLocalStream(ctx, input)
 }
 
+// RunStreamDefault executes the agent with streaming response using the default
+// behavior (ignores any customRunStreamFunc).
+//
+// This is intended for orchestrators that implement a custom RunStream and still
+// need to call the built-in streaming execution without causing recursion.
+func (a *Agent) RunStreamDefault(ctx context.Context, input string) (<-chan interfaces.AgentStreamEvent, error) {
+	// If this is a remote agent, delegate to remote execution
+	if a.isRemote {
+		return a.runRemoteStream(ctx, input)
+	}
+	// Local agent execution
+	return a.runLocalStream(ctx, input)
+}
+
 // runLocalStream executes a local agent with streaming
 func (a *Agent) runLocalStream(ctx context.Context, input string) (<-chan interfaces.AgentStreamEvent, error) {
 	// Check if LLM supports streaming

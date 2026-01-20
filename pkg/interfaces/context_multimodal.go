@@ -23,3 +23,13 @@ func GetContextContentParts(ctx context.Context) ([]ContentPart, bool) {
 	return parts, ok
 }
 
+// ClearContextContentParts explicitly overrides multimodal content parts in the context
+// with an empty slice.
+//
+// This is useful when you want to run follow-up reasoning/tool-calling on the text
+// only, while still allowing an earlier step (e.g. a vision extractor) to consume
+// the images from the original context.
+func ClearContextContentParts(ctx context.Context) context.Context {
+	return context.WithValue(ctx, multimodalContentPartsKey, []ContentPart{})
+}
+
