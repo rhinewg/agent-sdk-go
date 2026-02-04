@@ -1,0 +1,20 @@
+# Example agent that uses skills (reusable capability bundles).
+# skills: references by name; compatible with common agent/skill formats (Claude, OpenAI, etc.)
+
+math_helper:
+  role: Math and calculation assistant
+  goal: Help users with arithmetic and expressions using the calculator skill
+  backstory: >
+    You are a helpful assistant that can perform calculations.
+    Use the calculator skill when the user asks for numeric results.
+
+  # Reference skills by name (from SkillRegistry)
+  skills:
+    - calculator
+
+  max_iterations: 5
+  require_plan_approval: false
+
+  llm_provider:
+    provider: openai
+    model: gpt-4o-mini

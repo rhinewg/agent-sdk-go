@@ -52,6 +52,9 @@ type AgentConfig struct {
 	// NEW: Tool configurations
 	Tools []ToolConfigYAML `yaml:"tools,omitempty"`
 
+	// NEW: Skill references (reusable capability bundles; compatible with common agent/skill formats)
+	Skills []SkillRefYAML `yaml:"skills,omitempty"`
+
 	// NEW: Memory configuration (config only)
 	Memory *MemoryConfigYAML `yaml:"memory,omitempty"`
 
@@ -111,6 +114,35 @@ type ToolConfigYAML struct {
 	// For agent tools
 	URL     string `yaml:"url,omitempty"`     // Remote agent URL
 	Timeout string `yaml:"timeout,omitempty"` // Timeout duration
+}
+
+// SkillRefYAML references a skill by name in agent config. Supports inline name or object form.
+// Compatible with common formats (Claude/OpenAI style skill/capability references).
+// YAML can be: skills: [web_research, code_review] or skills: [{ name: web_research, enabled: true }]
+type SkillRefYAML struct {
+	Name            string                 `yaml:"name"`                       // required when using object form
+	Enabled         *bool                  `yaml:"enabled,omitempty"`          // default true
+	ConfigOverrides map[string]interface{} `yaml:"config_overrides,omitempty"` // optional per-agent overrides
+}
+
+// UnmarshalYAML supports both string (skill name only) and map (full object) forms
+func (s *SkillRefYAML) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind == yaml.ScalarNode {
+		s.Name = strings.TrimSpace(value.Value)
+		return nil
+	}
+	type raw SkillRefYAML
+	return value.Decode((*raw)(s))
+}
+
+// SkillDefinitionYAML is the file format for a skill definition (e.g. skills/*.yaml).
+// Compatible with generic agent skill schemas: name, description, instructions/prompt_fragment, tools.
+type SkillDefinitionYAML struct {
+	Name           string           `yaml:"name"`
+	Description    string           `yaml:"description"`
+	PromptFragment string           `yaml:"prompt_fragment,omitempty"` // optional; appended to system prompt
+	Instructions   string           `yaml:"instructions,omitempty"`    // alias for prompt_fragment (common in Claude/Cursor formats)
+	Tools          []ToolConfigYAML `yaml:"tools,omitempty"`
 }
 
 // MemoryConfigYAML represents memory configuration in YAML
@@ -584,6 +616,19 @@ func ExpandAgentConfig(config AgentConfig) AgentConfig {
 			expandedSubAgents[name] = ExpandAgentConfig(subAgentConfig) // Recursive expansion
 		}
 		expanded.SubAgents = expandedSubAgents
+	}
+
+	// Expand skill references (config_overrides)
+	if config.Skills != nil {
+		expandedSkills := make([]SkillRefYAML, len(config.Skills))
+		for i, ref := range config.Skills {
+			expandedSkills[i] = SkillRefYAML{
+				Name:            expandWithConfigVars(ref.Name, configVars),
+				Enabled:         ref.Enabled,
+				ConfigOverrides: expandConfigMap(ref.ConfigOverrides, configVars),
+			}
+		}
+		expanded.Skills = expandedSkills
 	}
 
 	// Expand LLM provider configuration

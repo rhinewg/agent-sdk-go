@@ -8,6 +8,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Ingenimax/agent-sdk-go/pkg/executionplan"
@@ -92,6 +93,19 @@ type Agent struct {
 	// Custom function fields
 	customRunFunc       CustomRunFunction       // Custom run function to replace default behavior
 	customRunStreamFunc CustomRunStreamFunction // Custom stream function to replace default streaming behavior
+
+	// Skill registry for resolving config.Skills (optional)
+	skillRegistry interfaces.SkillRegistry
+
+	// Optional: per-session skill store so multiple users sharing one agent do not affect each other
+	skillSessionStore interfaces.SkillSessionStore
+
+	// Dynamic skill load/unload: static part (config tools, subagents, MCP) vs per-skill tools/prompt
+	staticTools         []interfaces.Tool            // tools not from skills (config.Tools, subagents, MCP, WithTools)
+	dynamicSkillTools   map[string][]interfaces.Tool // skillName -> tools (for unload by name)
+	staticSystemPrompt  string                       // base prompt (role/goal/backstory) without skill fragments
+	dynamicSkillPrompts map[string]string            // skillName -> prompt fragment
+	skillsMu            sync.RWMutex                 // protects dynamic skill maps and merged a.tools/a.systemPrompt updates
 }
 
 // Option represents an option for configuring an agent
@@ -215,9 +229,41 @@ func WithAgentConfig(config AgentConfig, variables map[string]string) Option {
 		// Expand environment variables in all config sections
 		expandedConfig := ExpandAgentConfig(config)
 
-		// Existing system prompt processing
-		systemPrompt := FormatSystemPromptFromConfig(expandedConfig, variables)
-		a.systemPrompt = systemPrompt
+		// Base system prompt (role/goal/backstory); skill fragments merged later for dynamic load/unload
+		basePrompt := FormatSystemPromptFromConfig(expandedConfig, variables)
+
+		// Process skills into dynamic maps (so they can be unloaded or extended at runtime)
+		if len(expandedConfig.Skills) > 0 && a.skillRegistry != nil {
+			a.skillsMu.Lock()
+			if a.dynamicSkillTools == nil {
+				a.dynamicSkillTools = make(map[string][]interfaces.Tool)
+				a.dynamicSkillPrompts = make(map[string]string)
+			}
+			for _, ref := range expandedConfig.Skills {
+				if ref.Name == "" {
+					continue
+				}
+				if ref.Enabled != nil && !*ref.Enabled {
+					continue
+				}
+				skill, ok := a.skillRegistry.Get(ref.Name)
+				if !ok {
+					a.skillsMu.Unlock()
+					if a.logger != nil {
+						a.logger.Warn(context.Background(), "Skill not found in registry, skipping", map[string]interface{}{
+							"skill_name": ref.Name,
+						})
+					}
+					a.skillsMu.Lock()
+					continue
+				}
+				a.dynamicSkillTools[ref.Name] = skill.Tools()
+				if frag := strings.TrimSpace(skill.PromptFragment()); frag != "" {
+					a.dynamicSkillPrompts[ref.Name] = frag
+				}
+			}
+			a.skillsMu.Unlock()
+		}
 
 		// Existing response format and MCP config
 		if expandedConfig.ResponseFormat != nil {
@@ -396,6 +442,19 @@ func WithAgentConfig(config AgentConfig, variables map[string]string) Option {
 
 		// Store the expanded configuration for later access
 		a.generatedAgentConfig = &expandedConfig
+
+		// Snapshot static tools/prompt and merge with dynamic skills (enables LoadSkill/UnloadSkill)
+		a.skillsMu.Lock()
+		a.staticSystemPrompt = basePrompt
+		a.staticTools = make([]interfaces.Tool, len(a.tools))
+		copy(a.staticTools, a.tools)
+		if a.dynamicSkillTools != nil {
+			a.tools = a.recomputeMergedToolsLocked()
+			a.systemPrompt = a.recomputeMergedSystemPromptLocked()
+		} else {
+			a.systemPrompt = basePrompt
+		}
+		a.skillsMu.Unlock()
 	}
 }
 
@@ -424,6 +483,236 @@ func WithLazyMCPConfigs(configs []LazyMCPConfig) Option {
 	return func(a *Agent) {
 		a.lazyMCPConfigs = configs
 	}
+}
+
+// WithSkillRegistry sets the skill registry used to resolve config.Skills when applying agent config,
+// and registers the default skill tools (load_skill, unload_skill, list_loaded_skills) so the LLM can call them.
+func WithSkillRegistry(registry interfaces.SkillRegistry) Option {
+	return func(a *Agent) {
+		a.skillRegistry = registry
+		a.tools = deduplicateTools(append(a.tools, DefaultSkillTools(a)...))
+	}
+}
+
+// WithSkillSessionStore sets a per-session skill store so that when multiple users share one agent,
+// load_skill/unload_skill and effective tools/prompt are isolated per session (e.g. by conversation_id or org_id:conversation_id).
+// Request context should carry conversation_id (and optionally org_id) so the store can derive the session key.
+func WithSkillSessionStore(store interfaces.SkillSessionStore) Option {
+	return func(a *Agent) {
+		a.skillSessionStore = store
+	}
+}
+
+// getMergedTools returns staticTools + all dynamic skill tools (deduplicated). Used after LoadSkill/UnloadSkill.
+// If dynamic skills are not in use (staticTools == nil), returns a.tools unchanged.
+func (a *Agent) getMergedTools() []interfaces.Tool {
+	a.skillsMu.RLock()
+	defer a.skillsMu.RUnlock()
+	if a.staticTools == nil {
+		return a.tools
+	}
+	merged := make([]interfaces.Tool, 0, len(a.staticTools)+32)
+	merged = append(merged, a.staticTools...)
+	for _, skillTools := range a.dynamicSkillTools {
+		merged = append(merged, skillTools...)
+	}
+	return deduplicateTools(merged)
+}
+
+// getMergedSystemPrompt returns staticSystemPrompt + "# Skills" + dynamic skill fragments.
+// If dynamic skills are not in use, returns a.systemPrompt unchanged.
+func (a *Agent) getMergedSystemPrompt() string {
+	a.skillsMu.RLock()
+	defer a.skillsMu.RUnlock()
+	if a.dynamicSkillPrompts == nil || len(a.dynamicSkillPrompts) == 0 {
+		return a.systemPrompt
+	}
+	var frags []string
+	for _, f := range a.dynamicSkillPrompts {
+		if f != "" {
+			frags = append(frags, f)
+		}
+	}
+	if len(frags) == 0 {
+		return a.staticSystemPrompt
+	}
+	return a.staticSystemPrompt + "\n\n# Skills\n" + strings.Join(frags, "\n\n")
+}
+
+// LoadSkill loads a skill by name from the registry and adds its tools and prompt fragment to the agent.
+// Safe to call concurrently; subsequent Run calls will use the new capability.
+func (a *Agent) LoadSkill(ctx context.Context, skillName string) error {
+	if a.skillRegistry == nil {
+		return fmt.Errorf("agent has no skill registry")
+	}
+	skill, ok := a.skillRegistry.Get(skillName)
+	if !ok {
+		return fmt.Errorf("skill %q not found in registry", skillName)
+	}
+	a.skillsMu.Lock()
+	defer a.skillsMu.Unlock()
+	// Lazy-init dynamic maps and static snapshot when first using dynamic skills
+	if a.dynamicSkillTools == nil {
+		a.dynamicSkillTools = make(map[string][]interfaces.Tool)
+		a.dynamicSkillPrompts = make(map[string]string)
+		a.staticTools = make([]interfaces.Tool, len(a.tools))
+		copy(a.staticTools, a.tools)
+		a.staticSystemPrompt = a.systemPrompt
+	}
+	if _, already := a.dynamicSkillTools[skillName]; already {
+		return nil // idempotent
+	}
+	a.dynamicSkillTools[skillName] = skill.Tools()
+	if frag := strings.TrimSpace(skill.PromptFragment()); frag != "" {
+		a.dynamicSkillPrompts[skillName] = frag
+	}
+	// Recompute merged tools and prompt
+	a.tools = a.recomputeMergedToolsLocked()
+	a.systemPrompt = a.recomputeMergedSystemPromptLocked()
+	return nil
+}
+
+// UnloadSkill removes a skill by name (its tools and prompt fragment). No-op if not loaded.
+func (a *Agent) UnloadSkill(ctx context.Context, skillName string) error {
+	a.skillsMu.Lock()
+	defer a.skillsMu.Unlock()
+	if a.dynamicSkillTools == nil {
+		return nil
+	}
+	if _, ok := a.dynamicSkillTools[skillName]; !ok {
+		return nil
+	}
+	delete(a.dynamicSkillTools, skillName)
+	delete(a.dynamicSkillPrompts, skillName)
+	a.tools = a.recomputeMergedToolsLocked()
+	a.systemPrompt = a.recomputeMergedSystemPromptLocked()
+	return nil
+}
+
+// LoadedSkills returns the list of currently loaded skill names (from config or LoadSkill).
+func (a *Agent) LoadedSkills() []string {
+	a.skillsMu.RLock()
+	defer a.skillsMu.RUnlock()
+	if a.dynamicSkillTools == nil {
+		return nil
+	}
+	names := make([]string, 0, len(a.dynamicSkillTools))
+	for name := range a.dynamicSkillTools {
+		names = append(names, name)
+	}
+	return names
+}
+
+// recomputeMergedToolsLocked must be called with a.skillsMu held (write).
+func (a *Agent) recomputeMergedToolsLocked() []interfaces.Tool {
+	merged := make([]interfaces.Tool, 0, len(a.staticTools)+32)
+	merged = append(merged, a.staticTools...)
+	for _, skillTools := range a.dynamicSkillTools {
+		merged = append(merged, skillTools...)
+	}
+	return deduplicateTools(merged)
+}
+
+// recomputeMergedSystemPromptLocked must be called with a.skillsMu held (write).
+func (a *Agent) recomputeMergedSystemPromptLocked() string {
+	if len(a.dynamicSkillPrompts) == 0 {
+		return a.staticSystemPrompt
+	}
+	var frags []string
+	for _, f := range a.dynamicSkillPrompts {
+		if f != "" {
+			frags = append(frags, f)
+		}
+	}
+	if len(frags) == 0 {
+		return a.staticSystemPrompt
+	}
+	return a.staticSystemPrompt + "\n\n# Skills\n" + strings.Join(frags, "\n\n")
+}
+
+// getEffectiveTools returns tools for this request. When skillSessionStore is set, uses static tools + session-loaded skills so multiple users sharing the agent do not affect each other.
+func (a *Agent) getEffectiveTools(ctx context.Context) []interfaces.Tool {
+	if a.skillSessionStore == nil {
+		return a.tools
+	}
+	a.skillsMu.RLock()
+	base := a.staticTools
+	dynamicSkills := a.dynamicSkillTools
+	a.skillsMu.RUnlock()
+	if base == nil {
+		return a.tools
+	}
+	sessionSkills := a.skillSessionStore.GetLoadedSkills(ctx)
+	// Auto-load config.Skills only on first request (session not yet initialized).
+	// Once initialized (even if user unloaded all skills), don't auto-reload to respect user's choice.
+	if len(sessionSkills) == 0 && len(dynamicSkills) > 0 {
+		// Check if session has been initialized (prevents re-auto-load after user unloads)
+		if store, ok := a.skillSessionStore.(*DefaultSkillSessionStore); ok && !store.IsInitialized(ctx) {
+			for skillName := range dynamicSkills {
+				a.skillSessionStore.AddSkill(ctx, skillName)
+			}
+			sessionSkills = a.skillSessionStore.GetLoadedSkills(ctx)
+		}
+	}
+	if len(sessionSkills) == 0 {
+		return base
+	}
+	if a.skillRegistry == nil {
+		return base
+	}
+	merged := make([]interfaces.Tool, 0, len(base)+32)
+	merged = append(merged, base...)
+	for _, name := range sessionSkills {
+		skill, ok := a.skillRegistry.Get(name)
+		if !ok {
+			continue
+		}
+		merged = append(merged, skill.Tools()...)
+	}
+	return deduplicateTools(merged)
+}
+
+// getEffectiveSystemPrompt returns system prompt for this request. When skillSessionStore is set, uses static prompt + session-loaded skill fragments.
+func (a *Agent) getEffectiveSystemPrompt(ctx context.Context) string {
+	if a.skillSessionStore == nil {
+		return a.systemPrompt
+	}
+	a.skillsMu.RLock()
+	base := a.staticSystemPrompt
+	dynamicSkills := a.dynamicSkillTools
+	a.skillsMu.RUnlock()
+	sessionSkills := a.skillSessionStore.GetLoadedSkills(ctx)
+	// Auto-load config.Skills only on first request (session not yet initialized).
+	// Once initialized (even if user unloaded all skills), don't auto-reload to respect user's choice.
+	if len(sessionSkills) == 0 && len(dynamicSkills) > 0 {
+		// Check if session has been initialized (prevents re-auto-load after user unloads)
+		if store, ok := a.skillSessionStore.(*DefaultSkillSessionStore); ok && !store.IsInitialized(ctx) {
+			for skillName := range dynamicSkills {
+				a.skillSessionStore.AddSkill(ctx, skillName)
+			}
+			sessionSkills = a.skillSessionStore.GetLoadedSkills(ctx)
+		}
+	}
+	if len(sessionSkills) == 0 {
+		return base
+	}
+	if a.skillRegistry == nil {
+		return base
+	}
+	var frags []string
+	for _, name := range sessionSkills {
+		skill, ok := a.skillRegistry.Get(name)
+		if !ok {
+			continue
+		}
+		if f := strings.TrimSpace(skill.PromptFragment()); f != "" {
+			frags = append(frags, f)
+		}
+	}
+	if len(frags) == 0 {
+		return base
+	}
+	return base + "\n\n# Skills\n" + strings.Join(frags, "\n\n")
 }
 
 // WithMCPURLs adds MCP servers from URL strings
@@ -718,12 +1007,13 @@ func NewAgentFromConfig(agentName string, configs AgentConfigs, variables map[st
 		return nil, fmt.Errorf("agent configuration for %s not found", agentName)
 	}
 
-	// Add the agent config option
 	configOption := WithAgentConfig(config, variables)
 	nameOption := WithName(agentName)
 
-	// Combine all options
-	allOptions := append([]Option{configOption, nameOption}, options...)
+	// Apply configOption last so WithSkillRegistry (and other options) run first;
+	// otherwise config.Skills are skipped because a.skillRegistry is still nil when WithAgentConfig runs.
+	allOptions := append([]Option{nameOption}, options...)
+	allOptions = append(allOptions, configOption)
 
 	return NewAgent(allOptions...)
 }
@@ -918,8 +1208,8 @@ func (a *Agent) runLocalWithTracking(ctx context.Context, input string) (string,
 		return response, nil
 	}
 
-	// Use pre-initialized tools (manual + MCP tools already combined during agent creation)
-	allTools := a.tools
+	// Use effective tools (session-scoped when skillSessionStore is set so shared agent is isolated per user/conversation)
+	allTools := a.getEffectiveTools(ctx)
 
 	if len(a.mcpServers) > 0 {
 		mcpTools, err := a.collectMCPTools(ctx)
@@ -936,12 +1226,13 @@ func (a *Agent) runLocalWithTracking(ctx context.Context, input string) (string,
 		allTools = append(allTools, lazyMCPTools...)
 	}
 
+	effectivePrompt := a.getEffectiveSystemPrompt(ctx)
 	if (len(allTools) > 0) && a.requirePlanApproval {
-		a.planGenerator = executionplan.NewGenerator(a.llm, allTools, a.systemPrompt, a.requirePlanApproval)
+		a.planGenerator = executionplan.NewGenerator(a.llm, allTools, effectivePrompt, a.requirePlanApproval)
 		return a.runWithExecutionPlan(ctx, input)
 	}
 
-	return a.runWithoutExecutionPlanWithToolsTracked(ctx, input, allTools)
+	return a.runWithoutExecutionPlanWithToolsTracked(ctx, input, allTools, effectivePrompt)
 }
 
 func (a *Agent) RunWithAuth(ctx context.Context, input string, authToken string) (string, error) {
@@ -1210,16 +1501,25 @@ func (a *Agent) createLazyMCPTools() []interfaces.Tool {
 	return lazyTools
 }
 
-func (a *Agent) runWithoutExecutionPlanWithToolsTracked(ctx context.Context, input string, tools []interfaces.Tool) (string, error) {
+func (a *Agent) runWithoutExecutionPlanWithToolsTracked(ctx context.Context, input string, tools []interfaces.Tool, effectivePrompt string) (string, error) {
 	prompt := input
 
 	var response string
 	var err error
 
+	if effectivePrompt == "" {
+		effectivePrompt = a.systemPrompt
+	}
 	generateOptions := []interfaces.GenerateOption{}
-	if a.systemPrompt != "" {
-		a.logger.Debug(context.Background(), fmt.Sprintf("Using system prompt (length=%d)", len(a.systemPrompt)), nil)
-		generateOptions = append(generateOptions, openai.WithSystemMessage(a.systemPrompt))
+	// Use dynamic system prompt provider if skillSessionStore is set (allows updating prompt during tool calls)
+	if a.skillSessionStore != nil {
+		generateOptions = append(generateOptions, interfaces.WithSystemPromptProvider(func(ctx context.Context) string {
+			return a.getEffectiveSystemPrompt(ctx)
+		}))
+		a.logger.Debug(context.Background(), fmt.Sprintf("Using dynamic system prompt provider (initial length=%d)", len(effectivePrompt)), nil)
+	} else if effectivePrompt != "" {
+		a.logger.Debug(context.Background(), fmt.Sprintf("Using system prompt (length=%d)", len(effectivePrompt)), nil)
+		generateOptions = append(generateOptions, interfaces.WithSystemMessage(effectivePrompt))
 	} else {
 		a.logger.Warn(context.Background(), fmt.Sprintf("No system prompt set for agent %s", a.name), nil)
 	}

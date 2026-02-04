@@ -2,6 +2,7 @@ package openai
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -310,16 +311,41 @@ func (c *OpenAIClient) GenerateWithToolsStream(
 			})
 		}
 
+		// Helper function to update system message in messages array
+		updateSystemMessage := func(msgs []openai.ChatCompletionMessageParamUnion, newPrompt string) []openai.ChatCompletionMessageParamUnion {
+			result := make([]openai.ChatCompletionMessageParamUnion, 0, len(msgs))
+			for _, msg := range msgs {
+				msgBytes, _ := json.Marshal(msg)
+				var msgMap map[string]interface{}
+				if err := json.Unmarshal(msgBytes, &msgMap); err == nil {
+					if role, ok := msgMap["role"].(string); ok && role == "system" {
+						continue // Skip system messages
+					}
+				}
+				result = append(result, msg)
+			}
+			if newPrompt != "" {
+				result = append([]openai.ChatCompletionMessageParamUnion{openai.SystemMessage(newPrompt)}, result...)
+			}
+			return result
+		}
+
+		// Get initial system message
+		currentSystemPrompt := params.SystemMessage
+		if params.SystemPromptProvider != nil {
+			currentSystemPrompt = params.SystemPromptProvider(ctx)
+		}
+
 		// Build messages starting with system message if provided
 		messages := []openai.ChatCompletionMessageParamUnion{}
-		if params.SystemMessage != "" {
-			messages = append(messages, openai.SystemMessage(params.SystemMessage))
-			c.logger.Debug(ctx, "Using system message for tools", map[string]interface{}{"system_message": params.SystemMessage})
+		if currentSystemPrompt != "" {
+			messages = append(messages, openai.SystemMessage(currentSystemPrompt))
+			c.logger.Debug(ctx, "Using system message for tools", map[string]interface{}{"system_message": currentSystemPrompt})
 		}
 
 		// Build messages using unified builder
 		builder := newMessageHistoryBuilder(c.logger)
-			messages = append(messages, builder.buildMessages(ctx, prompt, params.Memory, params.ContentParts)...)
+		messages = append(messages, builder.buildMessages(ctx, prompt, params.Memory, params.ContentParts)...)
 
 		// Send initial message start event
 		eventChan <- interfaces.StreamEvent{
@@ -344,6 +370,21 @@ func (c *OpenAIClient) GenerateWithToolsStream(
 
 		// Iterative tool calling loop
 		for iteration := 0; iteration < maxIterations; iteration++ {
+			// Before each iteration (except first), check if system prompt needs updating
+			if iteration > 0 && params.SystemPromptProvider != nil {
+				newPrompt := params.SystemPromptProvider(ctx)
+				if newPrompt != currentSystemPrompt {
+					c.logger.Debug(ctx, "Updating system prompt during streaming iteration", map[string]interface{}{
+						"iteration":      iteration + 1,
+						"old_length":     len(currentSystemPrompt),
+						"new_length":     len(newPrompt),
+						"prompt_changed": true,
+					})
+					currentSystemPrompt = newPrompt
+					messages = updateSystemMessage(messages, newPrompt)
+				}
+			}
+
 			iterationHasContent := false
 			var iterationContentEvents []interfaces.StreamEvent
 			streamParams := openai.ChatCompletionNewParams{

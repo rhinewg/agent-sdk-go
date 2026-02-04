@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"testing"
 
 	"github.com/Ingenimax/agent-sdk-go/pkg/interfaces"
@@ -165,4 +166,71 @@ func TestConvertYAMLSchemaToResponseFormat(t *testing.T) {
 	if responseFormat != nil {
 		t.Fatal("Expected nil ResponseFormat for nil config")
 	}
+}
+
+func TestLoadAgentConfigsWithSkills(t *testing.T) {
+	configs, err := LoadAgentConfigsFromFile("testdata/agents_with_skills.yaml")
+	assert.NoError(t, err)
+	config, ok := configs["test_agent"]
+	assert.True(t, ok)
+	assert.Len(t, config.Skills, 2)
+	// First: string form -> Name only
+	assert.Equal(t, "calculator", config.Skills[0].Name)
+	assert.Nil(t, config.Skills[0].Enabled)
+	// Second: object form
+	assert.Equal(t, "optional_skill", config.Skills[1].Name)
+	assert.NotNil(t, config.Skills[1].Enabled)
+	assert.False(t, *config.Skills[1].Enabled)
+}
+
+func TestAgentWithSkillRegistry(t *testing.T) {
+	registry := NewSkillRegistry()
+	RegisterBuiltinSkills(registry)
+	skill, ok := registry.Get("calculator")
+	assert.True(t, ok)
+	assert.Equal(t, "calculator", skill.Name())
+	assert.NotEmpty(t, skill.Description())
+	assert.Len(t, skill.Tools(), 1)
+	assert.Equal(t, "calculator", skill.Tools()[0].Name())
+	assert.NotEmpty(t, skill.PromptFragment())
+}
+
+func TestAgentLoadSkillUnloadSkill(t *testing.T) {
+	registry := NewSkillRegistry()
+	RegisterBuiltinSkills(registry)
+	llm := &TestMockLLM{llmName: "test"}
+	a, err := NewAgent(
+		WithLLM(llm),
+		WithName("test"),
+		WithSkillRegistry(registry),
+		WithSystemPrompt("You are a helper."),
+	)
+	assert.NoError(t, err)
+	ctx := context.Background()
+
+	// Initially no dynamic skills
+	assert.Empty(t, a.LoadedSkills())
+
+	// LoadSkill adds the skill
+	err = a.LoadSkill(ctx, "calculator")
+	assert.NoError(t, err)
+	assert.Len(t, a.LoadedSkills(), 1)
+	assert.Contains(t, a.LoadedSkills(), "calculator")
+	tools := a.GetTools()
+	toolNames := make([]string, len(tools))
+	for i, tl := range tools {
+		toolNames[i] = tl.Name()
+	}
+	assert.Contains(t, toolNames, "calculator")
+	assert.Contains(t, a.GetSystemPrompt(), "Skills")
+	assert.Contains(t, a.GetSystemPrompt(), "calculator")
+
+	// UnloadSkill removes the skill (default skill tools load_skill/unload_skill/list_loaded_skills remain)
+	err = a.UnloadSkill(ctx, "calculator")
+	assert.NoError(t, err)
+	assert.Empty(t, a.LoadedSkills())
+	tools2 := a.GetTools()
+	// Still have the 3 default skill tools
+	assert.GreaterOrEqual(t, len(tools2), 3)
+	assert.NotContains(t, a.GetSystemPrompt(), "# Skills")
 }

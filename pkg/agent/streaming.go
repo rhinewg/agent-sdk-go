@@ -225,8 +225,8 @@ func (a *Agent) runLocalStream(ctx context.Context, input string) (<-chan interf
 			return
 		}
 
-		// Collect all tools
-		allTools := a.tools
+		// Collect effective tools (session-scoped when skillSessionStore is set)
+		allTools := a.getEffectiveTools(ctx)
 
 		// Add MCP tools if available
 		if len(a.mcpServers) > 0 {
@@ -290,11 +290,19 @@ func (a *Agent) runStreamingGeneration(
 	// Prepare generation options
 	options := []interfaces.GenerateOption{}
 
-	// Add system prompt if available
-	if a.systemPrompt != "" {
-		options = append(options, func(opts *interfaces.GenerateOptions) {
-			opts.SystemMessage = a.systemPrompt
-		})
+	// Add system prompt if available (session-scoped when skillSessionStore is set)
+	// Use dynamic provider if skillSessionStore is set to allow updating prompt during tool calls
+	if a.skillSessionStore != nil {
+		options = append(options, interfaces.WithSystemPromptProvider(func(ctx context.Context) string {
+			return a.getEffectiveSystemPrompt(ctx)
+		}))
+	} else {
+		effectivePrompt := a.getEffectiveSystemPrompt(ctx)
+		if effectivePrompt != "" {
+			options = append(options, func(opts *interfaces.GenerateOptions) {
+				opts.SystemMessage = effectivePrompt
+			})
+		}
 	}
 
 	// Add LLM config if available

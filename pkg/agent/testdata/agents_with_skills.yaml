@@ -1,0 +1,10 @@
+# Test config with skills (string and object form)
+test_agent:
+  role: Test role
+  goal: Test goal
+  backstory: Test backstory
+  skills:
+    - calculator
+    - name: optional_skill
+      enabled: false
+  max_iterations: 3

@@ -497,7 +497,7 @@ EXAMPLES:
       --dangerously-skip-permissions
 
     # Execute a task from YAML config
-    agent-cli task --config agents.yaml --task research_task --topic "AI"
+    agent-cli task --agent-config=agents.yaml --task-config=tasks.yaml --task=research_task --topic "AI"
 
     # Start interactive chat
     agent-cli chat
@@ -682,14 +682,33 @@ func resetConfig() {
 	fmt.Println("✅ Configuration reset. Run 'agent-cli init' to reconfigure.")
 }
 
+// parseAgentSkillFlags extracts --agent-config=, --agent=, --skills-dir= from args and returns remaining args.
+func parseAgentSkillFlags(args []string) (agentConfigPath, agentName, skillsDir string, remaining []string) {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case strings.HasPrefix(arg, "--agent-config="):
+			agentConfigPath = strings.TrimPrefix(arg, "--agent-config=")
+		case strings.HasPrefix(arg, "--agent="):
+			agentName = strings.TrimPrefix(arg, "--agent=")
+		case strings.HasPrefix(arg, "--skills-dir="):
+			skillsDir = strings.TrimPrefix(arg, "--skills-dir=")
+		default:
+			remaining = append(remaining, arg)
+		}
+	}
+	return agentConfigPath, agentName, skillsDir, remaining
+}
+
 func runAgent() {
 	if len(os.Args) < 3 {
-		fmt.Println("Usage: agent-cli run \"<prompt>\"")
+		fmt.Println("Usage: agent-cli run \"<prompt>\" [--agent-config=<path>] [--agent=<name>] [--skills-dir=<path>]")
 		fmt.Println("Example: agent-cli run \"What's the weather in San Francisco?\"")
 		return
 	}
 
-	prompt, imageURLs, imagePaths, imageDetail := parseRunMultimodalArgs(os.Args[2:])
+	agentConfigPath, agentName, skillsDir, runArgs := parseAgentSkillFlags(os.Args[2:])
+	prompt, imageURLs, imagePaths, imageDetail := parseRunMultimodalArgs(runArgs)
 
 	// Remove quotes if present
 	if strings.HasPrefix(prompt, "\"") && strings.HasSuffix(prompt, "\"") {
@@ -700,7 +719,32 @@ func runAgent() {
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 	config := loadConfig()
-	agent := createAgent(config)
+	llm := createLLM(config)
+
+	var agentInstance *agent.Agent
+	if agentConfigPath != "" && agentName != "" {
+		agentConfigs, err := agent.LoadAgentConfigsFromFile(agentConfigPath)
+		if err != nil {
+			log.Fatalf("❌ Failed to load agent config: %v", err)
+		}
+		variables := config.Variables
+		if variables == nil {
+			variables = make(map[string]string)
+		}
+		opts := []agent.Option{agent.WithLLM(llm)}
+		registry, err := buildCLISkillRegistry(skillsDir)
+		if err != nil {
+			log.Fatalf("❌ Failed to build skill registry: %v", err)
+		}
+		opts = append(opts, agent.WithSkillRegistry(registry))
+		var createErr error
+		agentInstance, createErr = agent.NewAgentFromConfig(agentName, agentConfigs, variables, opts...)
+		if createErr != nil {
+			log.Fatalf("❌ Failed to create agent from config: %v", createErr)
+		}
+	} else {
+		agentInstance = createAgent(config)
+	}
 
 	ctx := createContext(config)
 
@@ -715,7 +759,7 @@ func runAgent() {
 		}
 	}
 
-	response, err := agent.Run(ctx, prompt)
+	response, err := agentInstance.Run(ctx, prompt)
 	if err != nil {
 		log.Fatalf("❌ Agent execution failed: %v", err)
 	}
@@ -754,7 +798,7 @@ func parseRunMultimodalArgs(args []string) (prompt string, imageURLs []string, i
 }
 
 func executeTask() {
-	var agentConfigPath, taskConfigPath, taskName, topic string
+	var agentConfigPath, taskConfigPath, taskName, topic, skillsDir string
 	var variables = make(map[string]string)
 
 	// Parse command line arguments
@@ -769,6 +813,8 @@ func executeTask() {
 			taskName = strings.TrimPrefix(arg, "--task=")
 		case strings.HasPrefix(arg, "--topic="):
 			topic = strings.TrimPrefix(arg, "--topic=")
+		case strings.HasPrefix(arg, "--skills-dir="):
+			skillsDir = strings.TrimPrefix(arg, "--skills-dir=")
 		case strings.HasPrefix(arg, "--var="):
 			varPair := strings.TrimPrefix(arg, "--var=")
 			parts := strings.SplitN(varPair, "=", 2)
@@ -779,7 +825,7 @@ func executeTask() {
 	}
 
 	if agentConfigPath == "" || taskConfigPath == "" || taskName == "" {
-		fmt.Println("Usage: agent-cli task --agent-config=<path> --task-config=<path> --task=<name> [--topic=<topic>] [--var=key=value]")
+		fmt.Println("Usage: agent-cli task --agent-config=<path> --task-config=<path> --task=<name> [--topic=<topic>] [--skills-dir=<path>] [--var=key=value]")
 		fmt.Println("Example: agent-cli task --agent-config=agents.yaml --task-config=tasks.yaml --task=research_task --topic=\"AI\"")
 		return
 	}
@@ -812,8 +858,17 @@ func executeTask() {
 	config := loadConfig()
 	llm := createLLM(config)
 
+	opts := []agent.Option{agent.WithLLM(llm)}
+	if skillsDir != "" {
+		registry, err := buildCLISkillRegistry(skillsDir)
+		if err != nil {
+			log.Fatalf("❌ Failed to build skill registry: %v", err)
+		}
+		opts = append(opts, agent.WithSkillRegistry(registry))
+	}
+
 	// Create agent for task
-	taskAgent, err := agent.CreateAgentForTask(taskName, agentConfigs, taskConfigs, variables, agent.WithLLM(llm))
+	taskAgent, err := agent.CreateAgentForTask(taskName, agentConfigs, taskConfigs, variables, opts...)
 	if err != nil {
 		log.Fatalf("❌ Failed to create agent for task: %v", err)
 	}
@@ -850,9 +905,39 @@ func startInteractiveChat() {
 	fmt.Println("Tip: Use ':image <path>' to attach an image to your next message")
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
+	agentConfigPath, agentName, skillsDir, _ := parseAgentSkillFlags(os.Args[2:])
+
 	config := loadConfig()
-	agent := createAgent(config)
 	ctx := createContext(config)
+
+	var agentInstance *agent.Agent
+	if agentConfigPath != "" && agentName != "" {
+		agentConfigs, err := agent.LoadAgentConfigsFromFile(agentConfigPath)
+		if err != nil {
+			log.Fatalf("❌ Failed to load agent config: %v", err)
+		}
+		variables := config.Variables
+		if variables == nil {
+			variables = make(map[string]string)
+		}
+		llm := createLLM(config)
+		opts := []agent.Option{
+			agent.WithLLM(llm),
+			agent.WithSkillSessionStore(agent.NewDefaultSkillSessionStore(agent.DefaultSessionKey)),
+		}
+		registry, err := buildCLISkillRegistry(skillsDir)
+		if err != nil {
+			log.Fatalf("❌ Failed to build skill registry: %v", err)
+		}
+		opts = append(opts, agent.WithSkillRegistry(registry))
+		var createErr error
+		agentInstance, createErr = agent.NewAgentFromConfig(agentName, agentConfigs, variables, opts...)
+		if createErr != nil {
+			log.Fatalf("❌ Failed to create agent from config: %v", createErr)
+		}
+	} else {
+		agentInstance = createAgent(config)
+	}
 
 	reader := bufio.NewReader(os.Stdin)
 	var pendingParts []interfaces.ContentPart
@@ -929,7 +1014,7 @@ func startInteractiveChat() {
 			pendingParts = nil
 		}
 
-		response, err := agent.Run(ctxToUse, input)
+		response, err := agentInstance.Run(ctxToUse, input)
 		if err != nil {
 			fmt.Printf("❌ Error: %v\n", err)
 			continue
@@ -1526,7 +1611,7 @@ func generateConfigs() {
 func listResources() {
 	if len(os.Args) < 3 {
 		fmt.Println("Usage: agent-cli list <resource>")
-		fmt.Println("Available resources: providers, models, tools, config")
+		fmt.Println("Available resources: providers, models, tools, skills, config")
 		return
 	}
 
@@ -1538,11 +1623,13 @@ func listResources() {
 		listModels()
 	case "tools":
 		listTools()
+	case "skills":
+		listSkills()
 	case "config":
 		showConfig()
 	default:
 		fmt.Printf("Unknown resource: %s\n", resource)
-		fmt.Println("Available resources: providers, models, tools, config")
+		fmt.Println("Available resources: providers, models, tools, skills, config")
 	}
 }
 
@@ -1593,6 +1680,35 @@ func listTools() {
 	fmt.Println()
 	fmt.Println("Agent Tools:")
 	fmt.Println("  - Sub-agents can be used as tools for delegation")
+}
+
+func listSkills() {
+	var skillsDir string
+	for i := 3; i < len(os.Args); i++ {
+		arg := os.Args[i]
+		if strings.HasPrefix(arg, "--skills-dir=") {
+			skillsDir = strings.TrimPrefix(arg, "--skills-dir=")
+			break
+		}
+	}
+	registry, err := buildCLISkillRegistry(skillsDir)
+	if err != nil {
+		log.Fatalf("❌ Failed to build skill registry: %v", err)
+	}
+	list := registry.List()
+	fmt.Println("Available Skills:")
+	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	if len(list) == 0 {
+		fmt.Println("  (none)")
+		return
+	}
+	for _, s := range list {
+		desc := s.Description()
+		if desc == "" {
+			desc = "(no description)"
+		}
+		fmt.Printf("  - %s: %s\n", s.Name(), desc)
+	}
 }
 
 // Helper functions
@@ -1736,6 +1852,19 @@ func getDefaultModel(provider string) string {
 	default:
 		return "gpt-4o-mini"
 	}
+}
+
+// buildCLISkillRegistry builds a skill registry with builtin skills and optionally loads YAML skills from skillsDir.
+func buildCLISkillRegistry(skillsDir string) (interfaces.SkillRegistry, error) {
+	registry := agent.NewSkillRegistry()
+	agent.RegisterBuiltinSkills(registry)
+	if skillsDir != "" {
+		tf := agent.NewToolFactory()
+		if err := agent.LoadSkillsFromDir(registry, skillsDir, tf, nil); err != nil {
+			return nil, err
+		}
+	}
+	return registry, nil
 }
 
 func createAgent(config *CLIConfig) *agent.Agent {

@@ -26,6 +26,10 @@ type LLM interface {
 // GenerateOption represents options for text generation
 type GenerateOption func(options *GenerateOptions)
 
+// SystemPromptProvider is a function that returns the current system prompt.
+// Used to dynamically update system prompt during tool calling iterations (e.g., after load_skill/unload_skill).
+type SystemPromptProvider func(ctx context.Context) string
+
 // GenerateOptions contains configuration for text generation
 type GenerateOptions struct {
 	LLMConfig      *LLMConfig      // LLM config for the generation
@@ -40,6 +44,10 @@ type GenerateOptions struct {
 	// ContentParts holds multimodal input parts (e.g. text + image_url).
 	// When empty, providers should fall back to prompt-only behavior.
 	ContentParts []ContentPart
+
+	// SystemPromptProvider is called before each iteration to get the current system prompt.
+	// If provided, it overrides SystemMessage and allows dynamic updates during tool calling.
+	SystemPromptProvider SystemPromptProvider
 }
 
 // CacheConfig contains configuration for prompt caching (Anthropic only)
@@ -149,6 +157,15 @@ type TokenUsage struct {
 func WithSystemMessage(systemMessage string) GenerateOption {
 	return func(options *GenerateOptions) {
 		options.SystemMessage = systemMessage
+	}
+}
+
+// WithSystemPromptProvider creates a GenerateOption to set a dynamic system prompt provider.
+// The provider is called before each tool calling iteration to get the current system prompt.
+// This allows updating the system prompt dynamically (e.g., after load_skill/unload_skill).
+func WithSystemPromptProvider(provider SystemPromptProvider) GenerateOption {
+	return func(options *GenerateOptions) {
+		options.SystemPromptProvider = provider
 	}
 }
 

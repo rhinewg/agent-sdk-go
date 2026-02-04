@@ -479,10 +479,40 @@ func (c *OpenAIClient) GenerateWithTools(ctx context.Context, prompt string, too
 	toolCallHistory := make(map[string]int)
 	var toolCallHistoryMu sync.Mutex
 
+	// Helper function to update system message in messages array
+	updateSystemMessage := func(msgs []openai.ChatCompletionMessageParamUnion, newPrompt string) []openai.ChatCompletionMessageParamUnion {
+		// Remove existing system messages by checking message type
+		// SystemMessage creates a specific union type, so we filter by checking if it's NOT a system message
+		result := make([]openai.ChatCompletionMessageParamUnion, 0, len(msgs))
+		for _, msg := range msgs {
+			// Check if this is a system message by marshaling and checking role field
+			// This is a workaround since ChatCompletionMessageParamUnion doesn't expose a Role() method
+			msgBytes, _ := json.Marshal(msg)
+			var msgMap map[string]interface{}
+			if err := json.Unmarshal(msgBytes, &msgMap); err == nil {
+				if role, ok := msgMap["role"].(string); ok && role == "system" {
+					continue // Skip system messages
+				}
+			}
+			result = append(result, msg)
+		}
+		// Add new system message at the beginning
+		if newPrompt != "" {
+			result = append([]openai.ChatCompletionMessageParamUnion{openai.SystemMessage(newPrompt)}, result...)
+		}
+		return result
+	}
+
+	// Get initial system message
+	currentSystemPrompt := params.SystemMessage
+	if params.SystemPromptProvider != nil {
+		currentSystemPrompt = params.SystemPromptProvider(ctx)
+	}
+
 	// Add system message if available (for reasoning mode)
-	if params.SystemMessage != "" {
-		messages = append(messages, openai.SystemMessage(params.SystemMessage))
-		c.logger.Debug(ctx, "Using system message", map[string]interface{}{"system_message": params.SystemMessage})
+	if currentSystemPrompt != "" {
+		messages = append(messages, openai.SystemMessage(currentSystemPrompt))
+		c.logger.Debug(ctx, "Using system message", map[string]interface{}{"system_message": currentSystemPrompt})
 	}
 
 	req := openai.ChatCompletionNewParams{
@@ -533,6 +563,21 @@ func (c *OpenAIClient) GenerateWithTools(ctx context.Context, prompt string, too
 
 	// Iterative tool calling loop
 	for iteration := 0; iteration < maxIterations; iteration++ {
+		// Before each iteration (except first), check if system prompt needs updating
+		if iteration > 0 && params.SystemPromptProvider != nil {
+			newPrompt := params.SystemPromptProvider(ctx)
+			if newPrompt != currentSystemPrompt {
+				c.logger.Debug(ctx, "Updating system prompt during iteration", map[string]interface{}{
+					"iteration":      iteration + 1,
+					"old_length":     len(currentSystemPrompt),
+					"new_length":     len(newPrompt),
+					"prompt_changed": true,
+				})
+				currentSystemPrompt = newPrompt
+				messages = updateSystemMessage(messages, newPrompt)
+			}
+		}
+
 		// Update request with current messages
 		req.Messages = messages
 

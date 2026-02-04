@@ -1,0 +1,14 @@
+# Example skill definition (universal format).
+# Compatible with common agent/skill schemas: name, description, instructions/prompt_fragment, tools.
+
+name: calculator
+description: Perform mathematical calculations (add, subtract, multiply, divide, exponents)
+
+# Optional: when to use this skill (appended to system prompt)
+prompt_fragment: When the user asks for a numeric calculation or math expression, use the calculator tool.
+
+# tools use same schema as agent config (builtin/custom/agent/mcp)
+tools:
+  - type: builtin
+    name: calculator
+    enabled: true
