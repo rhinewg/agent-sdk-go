@@ -681,6 +681,12 @@ func (a *Agent) getEffectiveSystemPrompt(ctx context.Context) string {
 	base := a.staticSystemPrompt
 	dynamicSkills := a.dynamicSkillTools
 	a.skillsMu.RUnlock()
+	// When SkillSessionStore is set but staticSystemPrompt was never set (no WithAgentConfig
+	// and no LoadSkill yet), use the agent's configured systemPrompt so the base prompt
+	// is not lost on first request.
+	if base == "" {
+		base = a.systemPrompt
+	}
 	sessionSkills := a.skillSessionStore.GetLoadedSkills(ctx)
 	// Auto-load config.Skills only on first request (session not yet initialized).
 	// Once initialized (even if user unloaded all skills), don't auto-reload to respect user's choice.
