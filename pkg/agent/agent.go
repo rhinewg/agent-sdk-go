@@ -649,41 +649,6 @@ func (a *Agent) buildSkillsSection(
 	return "# Skills\n\n" + strings.Join(sections, "\n\n")
 }
 
-// getMergedSystemPrompt returns staticSystemPrompt + "# Skills" + dynamic skill fragments.
-// If dynamic skills are not in use, returns a.systemPrompt unchanged.
-// Now includes skill discovery information (loaded skills summary and available-to-load list) when enabled.
-func (a *Agent) getMergedSystemPrompt() string {
-	a.skillsMu.RLock()
-	defer a.skillsMu.RUnlock()
-	if a.dynamicSkillPrompts == nil || len(a.dynamicSkillPrompts) == 0 {
-		return a.systemPrompt
-	}
-
-	// Collect loaded skill names from dynamicSkillTools keys
-	var loadedSkillNames []string
-	if a.dynamicSkillTools != nil {
-		for name := range a.dynamicSkillTools {
-			loadedSkillNames = append(loadedSkillNames, name)
-		}
-	}
-
-	// Build skills section with discovery information
-	skillsSection := a.buildSkillsSection(
-		loadedSkillNames,
-		a.skillRegistry,
-		a.dynamicSkillPrompts,
-		a.injectSkillSummary,
-		a.injectAvailableSkillsList,
-		a.injectSkillInstructions,
-	)
-
-	if skillsSection == "" {
-		return a.staticSystemPrompt
-	}
-
-	return a.staticSystemPrompt + "\n\n" + skillsSection
-}
-
 // LoadSkill loads a skill by name from the registry and adds its tools and prompt fragment to the agent.
 // Safe to call concurrently; subsequent Run calls will use the new capability.
 func (a *Agent) LoadSkill(ctx context.Context, skillName string) error {
