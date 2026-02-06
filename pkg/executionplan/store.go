@@ -2,6 +2,7 @@ package executionplan
 
 import (
 	"sync"
+	"time"
 )
 
 // Store handles storage and retrieval of execution plans
@@ -42,6 +43,26 @@ func (s *Store) ListPlans() []*ExecutionPlan {
 		plans = append(plans, plan)
 	}
 	return plans
+}
+
+// GetLatestPendingPlan returns the most recently created plan that is pending approval, or nil if none.
+// Used so the agent can interpret user replies like "执行" or "approve" as approval of the last shown plan.
+func (s *Store) GetLatestPendingPlan() *ExecutionPlan {
+	s.plansMutex.RLock()
+	defer s.plansMutex.RUnlock()
+
+	var latest *ExecutionPlan
+	var latestAt time.Time
+	for _, plan := range s.plans {
+		if plan.Status != StatusPendingApproval {
+			continue
+		}
+		if latest == nil || plan.CreatedAt.After(latestAt) {
+			latest = plan
+			latestAt = plan.CreatedAt
+		}
+	}
+	return latest
 }
 
 // DeletePlan deletes a plan by its task ID

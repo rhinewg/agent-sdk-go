@@ -1742,11 +1742,56 @@ func (a *Agent) runWithoutExecutionPlanWithToolsTracked(ctx context.Context, inp
 	return response, nil
 }
 
-// extractPlanAction attempts to extract a plan action from the user input
-// Returns taskID, action, and remaining input
+// extractPlanAction extracts a plan action from the user input so that replies like "执行" or "approve"
+// trigger execution of the pending plan. Returns taskID, action, and remaining input (for modify).
 func (a *Agent) extractPlanAction(input string) (string, string, string) {
-	// This is a placeholder implementation
-	// In a real implementation, you would use NLP or pattern matching to extract plan actions
+	trimmed := strings.TrimSpace(input)
+	if trimmed == "" {
+		return "", "", input
+	}
+	lower := strings.ToLower(trimmed)
+
+	// Approval phrases: user agrees to execute the plan
+	approvalPhrases := []string{
+		"执行", "批准", "同意", "好的", "好", "可以", "通过", "开始执行", "去执行",
+		"approve", "approved", "yes", "ok", "go", "execute", "proceed", "do it", "confirm", "y",
+	}
+	for _, p := range approvalPhrases {
+		if lower == p || lower == p+"." || lower == p+"!" || strings.HasPrefix(lower, p+" ") {
+			if plan := a.planStore.GetLatestPendingPlan(); plan != nil {
+				return plan.TaskID, "approve", ""
+			}
+			return "", "", input
+		}
+	}
+
+	// Cancel phrases
+	cancelPhrases := []string{"取消", "cancel", "abort", "不执行", "不要执行", "n"}
+	for _, p := range cancelPhrases {
+		if lower == p || lower == p+"." || strings.HasPrefix(lower, p+" ") {
+			if plan := a.planStore.GetLatestPendingPlan(); plan != nil {
+				return plan.TaskID, "cancel", ""
+			}
+			return "", "", input
+		}
+	}
+
+	// Modify: "修改：xxx" or "modify: xxx" — use rest as modification request
+	const modifyPrefixZh = "修改："
+	const modifyPrefixEn = "modify:"
+	if strings.HasPrefix(trimmed, modifyPrefixZh) {
+		rest := strings.TrimSpace(trimmed[len(modifyPrefixZh):])
+		if plan := a.planStore.GetLatestPendingPlan(); rest != "" && plan != nil {
+			return plan.TaskID, "modify", rest
+		}
+	}
+	if strings.HasPrefix(lower, modifyPrefixEn) {
+		rest := strings.TrimSpace(trimmed[len(modifyPrefixEn):])
+		if plan := a.planStore.GetLatestPendingPlan(); rest != "" && plan != nil {
+			return plan.TaskID, "modify", rest
+		}
+	}
+
 	return "", "", input
 }
 
