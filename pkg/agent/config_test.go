@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/Ingenimax/agent-sdk-go/pkg/interfaces"
+	"github.com/Ingenimax/agent-sdk-go/pkg/memory"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -230,7 +231,156 @@ func TestAgentLoadSkillUnloadSkill(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Empty(t, a.LoadedSkills())
 	tools2 := a.GetTools()
-	// Still have the 3 default skill tools
-	assert.GreaterOrEqual(t, len(tools2), 3)
+	// Still have the 4 default skill tools (load_skill, unload_skill, list_loaded_skills, list_available_skills)
+	assert.GreaterOrEqual(t, len(tools2), 4)
 	assert.NotContains(t, a.GetSystemPrompt(), "# Skills")
+}
+
+func TestSkillDiscoveryInjection(t *testing.T) {
+	registry := NewSkillRegistry()
+	RegisterBuiltinSkills(registry)
+	
+	// Register another skill for testing "available to load"
+	testSkill := NewSkill(
+		"test_skill",
+		"Test skill for discovery",
+		[]interfaces.Tool{},
+		"When you need to test, use test_skill.",
+	)
+	registry.Register(testSkill)
+
+	llm := &TestMockLLM{llmName: "test"}
+	a, err := NewAgent(
+		WithLLM(llm),
+		WithName("test"),
+		WithSkillRegistry(registry),
+		WithSystemPrompt("You are a helper."),
+	)
+	assert.NoError(t, err)
+	ctx := context.Background()
+
+	// Load calculator skill
+	err = a.LoadSkill(ctx, "calculator")
+	assert.NoError(t, err)
+
+	// Get system prompt and verify skill discovery sections
+	prompt := a.GetSystemPrompt()
+	
+	// Should contain "# Skills" section
+	assert.Contains(t, prompt, "# Skills")
+	
+	// Should contain "Loaded" section with calculator
+	assert.Contains(t, prompt, "## Loaded")
+	assert.Contains(t, prompt, "- calculator:")
+	assert.Contains(t, prompt, "Perform mathematical calculations")
+	
+	// Should contain "Available to load" section with test_skill
+	assert.Contains(t, prompt, "## Available to load")
+	assert.Contains(t, prompt, "- test_skill:")
+	assert.Contains(t, prompt, "Test skill for discovery")
+	
+	// Should contain "Instructions" section with prompt fragment
+	assert.Contains(t, prompt, "## Instructions")
+	assert.Contains(t, prompt, "When the user asks for a numeric calculation")
+}
+
+func TestSkillDiscoveryInjectionDisabled(t *testing.T) {
+	registry := NewSkillRegistry()
+	RegisterBuiltinSkills(registry)
+	
+	llm := &TestMockLLM{llmName: "test"}
+	a, err := NewAgent(
+		WithLLM(llm),
+		WithName("test"),
+		WithSkillRegistry(registry),
+		WithSystemPrompt("You are a helper."),
+		WithSkillDiscoveryInjection(false, false, true), // Disable summary and available list, keep instructions
+	)
+	assert.NoError(t, err)
+	ctx := context.Background()
+
+	// Load calculator skill
+	err = a.LoadSkill(ctx, "calculator")
+	assert.NoError(t, err)
+
+	// Get system prompt
+	prompt := a.GetSystemPrompt()
+	
+	// Should contain "# Skills" section
+	assert.Contains(t, prompt, "# Skills")
+	
+	// Should NOT contain "Loaded" section
+	assert.NotContains(t, prompt, "## Loaded")
+	
+	// Should NOT contain "Available to load" section
+	assert.NotContains(t, prompt, "## Available to load")
+	
+	// Should contain "Instructions" section (enabled)
+	assert.Contains(t, prompt, "## Instructions")
+	assert.Contains(t, prompt, "When the user asks for a numeric calculation")
+}
+
+func TestSkillDiscoveryInjectionWithSessionStore(t *testing.T) {
+	registry := NewSkillRegistry()
+	RegisterBuiltinSkills(registry)
+	
+	testSkill := NewSkill(
+		"test_skill",
+		"Test skill for discovery",
+		[]interfaces.Tool{},
+		"When you need to test, use test_skill.",
+	)
+	registry.Register(testSkill)
+
+	llm := &TestMockLLM{llmName: "test"}
+	store := NewDefaultSkillSessionStore(DefaultSessionKey)
+	a, err := NewAgent(
+		WithLLM(llm),
+		WithName("test"),
+		WithSkillRegistry(registry),
+		WithSkillSessionStore(store),
+		WithSystemPrompt("You are a helper."),
+	)
+	assert.NoError(t, err)
+	ctx := context.Background()
+	
+	// Add conversation_id to context
+	ctx = memory.WithConversationID(ctx, "conv-123")
+
+	// Load calculator skill for this session
+	a.skillSessionStore.AddSkill(ctx, "calculator")
+
+	// Get effective system prompt
+	prompt := a.getEffectiveSystemPrompt(ctx)
+	
+	// Should contain skill discovery sections
+	assert.Contains(t, prompt, "# Skills")
+	assert.Contains(t, prompt, "## Loaded")
+	assert.Contains(t, prompt, "- calculator:")
+	assert.Contains(t, prompt, "## Available to load")
+	assert.Contains(t, prompt, "- test_skill:")
+}
+
+func TestListAvailableSkillsTool(t *testing.T) {
+	registry := NewSkillRegistry()
+	RegisterBuiltinSkills(registry)
+	registry.Register(NewSkill("extra_skill", "An extra skill", nil, "Use when needed."))
+
+	llm := &TestMockLLM{llmName: "test"}
+	a, err := NewAgent(
+		WithLLM(llm),
+		WithName("test"),
+		WithSkillRegistry(registry),
+		WithSystemPrompt("You are a helper."),
+	)
+	assert.NoError(t, err)
+
+	tool := NewListAvailableSkillsTool(a)
+	assert.Equal(t, "list_available_skills", tool.Name())
+	out, err := tool.Execute(context.Background(), "")
+	assert.NoError(t, err)
+	assert.Contains(t, out, "Available skills")
+	assert.Contains(t, out, "calculator:")
+	assert.Contains(t, out, "extra_skill:")
+	assert.Contains(t, out, "An extra skill")
 }

@@ -136,6 +136,50 @@ func (t *listLoadedSkillsTool) Execute(ctx context.Context, args string) (string
 	return fmt.Sprintf("Loaded skills: %s", strings.Join(names, ", ")), nil
 }
 
+// listAvailableSkillsTool is a built-in tool that returns all skills in the registry (name + description).
+// The LLM can use this to discover what skills exist and then call load_skill with a name.
+type listAvailableSkillsTool struct{ agent *Agent }
+
+// NewListAvailableSkillsTool returns a tool that returns registry.List() with name and description when executed.
+func NewListAvailableSkillsTool(a *Agent) interfaces.Tool {
+	return &listAvailableSkillsTool{agent: a}
+}
+
+func (t *listAvailableSkillsTool) Name() string { return "list_available_skills" }
+
+func (t *listAvailableSkillsTool) Description() string {
+	return "List all skills that can be loaded from the registry (name and short description). Use this to discover which skills exist before calling load_skill. Returns both currently loaded and not-yet-loaded skills."
+}
+
+func (t *listAvailableSkillsTool) Parameters() map[string]interfaces.ParameterSpec {
+	return map[string]interfaces.ParameterSpec{}
+}
+
+func (t *listAvailableSkillsTool) Run(ctx context.Context, input string) (string, error) {
+	return t.Execute(ctx, input)
+}
+
+func (t *listAvailableSkillsTool) Execute(ctx context.Context, args string) (string, error) {
+	if t.agent.skillRegistry == nil {
+		return "No skill registry configured. No skills are available.", nil
+	}
+	list := t.agent.skillRegistry.List()
+	if len(list) == 0 {
+		return "No skills are registered in the registry.", nil
+	}
+	// Build name: description lines for each skill
+	lines := make([]string, 0, len(list))
+	for _, s := range list {
+		desc := s.Description()
+		if desc == "" {
+			desc = "(no description)"
+		}
+		desc = strings.ReplaceAll(desc, "\n", " ")
+		lines = append(lines, fmt.Sprintf("- %s: %s", s.Name(), desc))
+	}
+	return "Available skills (call load_skill with the name to load):\n" + strings.Join(lines, "\n"), nil
+}
+
 // parseSkillNameArg extracts skill_name from JSON (e.g. {"skill_name":"calculator"}) or returns trimmed args as name.
 func parseSkillNameArg(args string) string {
 	s := strings.TrimSpace(args)
@@ -152,11 +196,12 @@ func parseSkillNameArg(args string) string {
 }
 
 // DefaultSkillTools returns the built-in tools for dynamic skill load/unload when the agent has a skill registry.
-// Register these so the LLM can call load_skill, unload_skill, and list_loaded_skills.
+// Register these so the LLM can call load_skill, unload_skill, list_loaded_skills, and list_available_skills.
 func DefaultSkillTools(a *Agent) []interfaces.Tool {
 	return []interfaces.Tool{
 		NewLoadSkillTool(a),
 		NewUnloadSkillTool(a),
 		NewListLoadedSkillsTool(a),
+		NewListAvailableSkillsTool(a),
 	}
 }

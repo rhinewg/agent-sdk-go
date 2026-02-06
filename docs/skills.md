@@ -74,15 +74,16 @@ names := agentInstance.LoadedSkills()
 
 ### Built-in tools (LLM can call)
 
-When the agent is created with `WithSkillRegistry(registry)`, three default tools are registered so the LLM can load/unload skills during the conversation:
+When the agent is created with `WithSkillRegistry(registry)`, four default tools are registered so the LLM can discover, load, and unload skills during the conversation:
 
-| Tool                 | Description |
-|----------------------|-------------|
-| **load_skill**       | Load a skill by name. Parameter: `skill_name` (e.g. `calculator`). |
-| **unload_skill**     | Unload a skill by name. Parameter: `skill_name`. |
-| **list_loaded_skills** | List currently loaded skill names (no parameters). |
+| Tool                    | Description |
+|-------------------------|-------------|
+| **load_skill**          | Load a skill by name. Parameter: `skill_name` (e.g. `calculator`). |
+| **unload_skill**        | Unload a skill by name. Parameter: `skill_name`. |
+| **list_loaded_skills**  | List currently loaded skill names (no parameters). |
+| **list_available_skills**| List all skills in the registry (name + description). Use to discover what can be loaded before calling load_skill. No parameters. |
 
-The model can call these like any other tool (e.g. when the user asks to “add calculator” or “remove web search”). Skills from `config.Skills` are stored the same way and can be unloaded via the **unload_skill** tool or `UnloadSkill()`.
+The model can call these like any other tool (e.g. when the user asks to “add calculator” or “remove web search”). Use **list_available_skills** to see which skills exist, then **load_skill** to enable one. Skills from `config.Skills` are stored the same way and can be unloaded via the **unload_skill** tool or `UnloadSkill()`.
 
 ## Shared agent: per-user / per-conversation isolation
 
@@ -148,6 +149,49 @@ agent-cli list skills --skills-dir=./skills
 - **技能名与提示词一致**：在技能定义中明确使用实际技能名（如 `mcp_web_search`），并在 `prompt_fragment` 里直接引用这个名字，避免模型臆造诸如 `web_research` 之类不存在的技能。
 - **明确工具名**：在提示词中注明 MCP 工具的真实名称（例如从 AliyunBailianMCP_WebSearch 发现的 `bailian_web_search`），引导模型直接调用该工具，而不是虚构新的工具名。
 - **禁止虚构能力**：在技能提示中显式说明“不要创建新的技能名或工具名（如 `web_research`），只能使用配置中实际存在的技能和 MCP 工具”。
+
+## Skill discovery in system prompt
+
+When an agent is created with `WithSkillRegistry`, the system prompt automatically includes skill discovery information to help the LLM discover and match skills:
+
+- **Loaded skills summary**: A list of currently loaded skills with their names and short descriptions (e.g., `- calculator: Perform mathematical calculations...`).
+- **Available to load**: A list of skills in the registry that are not currently loaded, enabling the LLM to discover what can be loaded via `load_skill`.
+- **Instructions**: The existing prompt fragments from loaded skills (when to use each skill).
+
+The format in the system prompt:
+
+```
+# Skills
+
+## Loaded (name — short description)
+- calculator: Perform mathematical calculations (add, subtract, multiply, divide, exponents).
+- web_research: Search the web and summarize results.
+
+## Available to load (call load_skill with the name if needed)
+- code_review: Review code and suggest improvements.
+
+## Instructions (when to use each loaded skill)
+<prompt_fragment 1>
+<prompt_fragment 2>
+...
+```
+
+### Controlling skill discovery injection
+
+Use `WithSkillDiscoveryInjection` to control what is injected:
+
+```go
+agent.NewAgent(...,
+    agent.WithSkillRegistry(registry),
+    agent.WithSkillDiscoveryInjection(
+        true,  // injectSkillSummary: show loaded skills summary
+        true,  // injectAvailableSkillsList: show available-to-load list
+        true,  // injectSkillInstructions: include prompt fragments
+    ),
+)
+```
+
+By default (when `WithSkillRegistry` is used), all three are enabled. Set to `false` to disable specific sections (e.g., disable instructions to save tokens).
 
 ## Compatibility
 

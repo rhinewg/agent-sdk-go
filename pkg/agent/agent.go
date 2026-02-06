@@ -106,6 +106,11 @@ type Agent struct {
 	staticSystemPrompt  string                       // base prompt (role/goal/backstory) without skill fragments
 	dynamicSkillPrompts map[string]string            // skillName -> prompt fragment
 	skillsMu            sync.RWMutex                 // protects dynamic skill maps and merged a.tools/a.systemPrompt updates
+
+	// Skill discovery injection controls (for LLM skill retrieval/matching)
+	injectSkillSummary        bool // Whether to inject loaded skills summary (name + description) in system prompt
+	injectAvailableSkillsList bool // Whether to inject available-to-load skills list in system prompt
+	injectSkillInstructions   bool // Whether to inject skill prompt fragments (Instructions section)
 }
 
 // Option represents an option for configuring an agent
@@ -488,10 +493,15 @@ func WithLazyMCPConfigs(configs []LazyMCPConfig) Option {
 
 // WithSkillRegistry sets the skill registry used to resolve config.Skills when applying agent config,
 // and registers the default skill tools (load_skill, unload_skill, list_loaded_skills) so the LLM can call them.
+// Also enables skill discovery injection by default (injectSkillSummary=true, injectAvailableSkillsList=true, injectSkillInstructions=true).
 func WithSkillRegistry(registry interfaces.SkillRegistry) Option {
 	return func(a *Agent) {
 		a.skillRegistry = registry
 		a.tools = deduplicateTools(append(a.tools, DefaultSkillTools(a)...))
+		// Enable skill discovery injection by default when registry is set
+		a.injectSkillSummary = true
+		a.injectAvailableSkillsList = true
+		a.injectSkillInstructions = true
 	}
 }
 
@@ -501,6 +511,28 @@ func WithSkillRegistry(registry interfaces.SkillRegistry) Option {
 func WithSkillSessionStore(store interfaces.SkillSessionStore) Option {
 	return func(a *Agent) {
 		a.skillSessionStore = store
+	}
+}
+
+// WithSkillDiscoveryInjection configures whether to inject skill discovery information in the system prompt.
+// This enables LLM to discover and match skills for retrieval and usage.
+//
+// Parameters:
+//   - injectSummary: whether to inject loaded skills summary (name + description) - default true when WithSkillRegistry is used
+//   - injectAvailable: whether to inject available-to-load skills list - default true when WithSkillRegistry is used
+//   - injectInstructions: whether to inject skill prompt fragments (Instructions section) - default true when WithSkillRegistry is used
+//
+// Example:
+//
+//	agent.NewAgent(...,
+//		agent.WithSkillRegistry(registry),
+//		agent.WithSkillDiscoveryInjection(true, true, false), // Enable summary and available list, disable instructions to save tokens
+//	)
+func WithSkillDiscoveryInjection(injectSummary, injectAvailable, injectInstructions bool) Option {
+	return func(a *Agent) {
+		a.injectSkillSummary = injectSummary
+		a.injectAvailableSkillsList = injectAvailable
+		a.injectSkillInstructions = injectInstructions
 	}
 }
 
@@ -520,24 +552,136 @@ func (a *Agent) getMergedTools() []interfaces.Tool {
 	return deduplicateTools(merged)
 }
 
+// buildSkillsSection builds the "# Skills" section of the system prompt with skill discovery information.
+// It includes: loaded skills summary, available-to-load skills list (optional), and skill instructions (optional).
+// This enables LLM to discover and match skills for retrieval and usage.
+//
+// Parameters:
+//   - loadedSkillNames: list of currently loaded skill names
+//   - skillRegistry: registry to look up skill details (Name, Description, PromptFragment)
+//   - promptFragments: map of skill name -> prompt fragment (for Instructions section)
+//   - injectSummary: whether to inject loaded skills summary
+//   - injectAvailable: whether to inject available-to-load skills list
+//   - injectInstructions: whether to inject skill prompt fragments
+//
+// Returns: the complete "# Skills" section string, or empty string if no content should be injected.
+func (a *Agent) buildSkillsSection(
+	loadedSkillNames []string,
+	skillRegistry interfaces.SkillRegistry,
+	promptFragments map[string]string,
+	injectSummary bool,
+	injectAvailable bool,
+	injectInstructions bool,
+) string {
+	if skillRegistry == nil && len(promptFragments) == 0 {
+		return ""
+	}
+
+	var sections []string
+
+	// Build "Loaded" section: name + description for loaded skills
+	if injectSummary && len(loadedSkillNames) > 0 && skillRegistry != nil {
+		var loadedItems []string
+		for _, name := range loadedSkillNames {
+			skill, ok := skillRegistry.Get(name)
+			if !ok {
+				continue
+			}
+			desc := skill.Description()
+			if desc == "" {
+				desc = "(no description)"
+			}
+			// Replace newlines in description with spaces for single-line format
+			desc = strings.ReplaceAll(desc, "\n", " ")
+			loadedItems = append(loadedItems, fmt.Sprintf("- %s: %s", name, desc))
+		}
+		if len(loadedItems) > 0 {
+			sections = append(sections, "## Loaded (name — short description)")
+			sections = append(sections, strings.Join(loadedItems, "\n"))
+		}
+	}
+
+	// Build "Available to load" section: skills in registry but not currently loaded
+	if injectAvailable && skillRegistry != nil {
+		allSkills := skillRegistry.List()
+		if len(allSkills) > 0 {
+			loadedSet := make(map[string]struct{})
+			for _, name := range loadedSkillNames {
+				loadedSet[name] = struct{}{}
+			}
+
+			var availableItems []string
+			for _, skill := range allSkills {
+				if _, loaded := loadedSet[skill.Name()]; !loaded {
+					desc := skill.Description()
+					if desc == "" {
+						desc = "(no description)"
+					}
+					desc = strings.ReplaceAll(desc, "\n", " ")
+					availableItems = append(availableItems, fmt.Sprintf("- %s: %s", skill.Name(), desc))
+				}
+			}
+			if len(availableItems) > 0 {
+				sections = append(sections, "## Available to load (call load_skill with the name if needed)")
+				sections = append(sections, strings.Join(availableItems, "\n"))
+			}
+		}
+	}
+
+	// Build "Instructions" section: existing prompt fragments
+	if injectInstructions && len(promptFragments) > 0 {
+		var frags []string
+		for _, f := range promptFragments {
+			if f != "" {
+				frags = append(frags, f)
+			}
+		}
+		if len(frags) > 0 {
+			sections = append(sections, "## Instructions (when to use each loaded skill)")
+			sections = append(sections, strings.Join(frags, "\n\n"))
+		}
+	}
+
+	if len(sections) == 0 {
+		return ""
+	}
+
+	return "# Skills\n\n" + strings.Join(sections, "\n\n")
+}
+
 // getMergedSystemPrompt returns staticSystemPrompt + "# Skills" + dynamic skill fragments.
 // If dynamic skills are not in use, returns a.systemPrompt unchanged.
+// Now includes skill discovery information (loaded skills summary and available-to-load list) when enabled.
 func (a *Agent) getMergedSystemPrompt() string {
 	a.skillsMu.RLock()
 	defer a.skillsMu.RUnlock()
 	if a.dynamicSkillPrompts == nil || len(a.dynamicSkillPrompts) == 0 {
 		return a.systemPrompt
 	}
-	var frags []string
-	for _, f := range a.dynamicSkillPrompts {
-		if f != "" {
-			frags = append(frags, f)
+
+	// Collect loaded skill names from dynamicSkillTools keys
+	var loadedSkillNames []string
+	if a.dynamicSkillTools != nil {
+		for name := range a.dynamicSkillTools {
+			loadedSkillNames = append(loadedSkillNames, name)
 		}
 	}
-	if len(frags) == 0 {
+
+	// Build skills section with discovery information
+	skillsSection := a.buildSkillsSection(
+		loadedSkillNames,
+		a.skillRegistry,
+		a.dynamicSkillPrompts,
+		a.injectSkillSummary,
+		a.injectAvailableSkillsList,
+		a.injectSkillInstructions,
+	)
+
+	if skillsSection == "" {
 		return a.staticSystemPrompt
 	}
-	return a.staticSystemPrompt + "\n\n# Skills\n" + strings.Join(frags, "\n\n")
+
+	return a.staticSystemPrompt + "\n\n" + skillsSection
 }
 
 // LoadSkill loads a skill by name from the registry and adds its tools and prompt fragment to the agent.
@@ -615,20 +759,35 @@ func (a *Agent) recomputeMergedToolsLocked() []interfaces.Tool {
 }
 
 // recomputeMergedSystemPromptLocked must be called with a.skillsMu held (write).
+// Now includes skill discovery information (loaded skills summary and available-to-load list) when enabled.
 func (a *Agent) recomputeMergedSystemPromptLocked() string {
 	if len(a.dynamicSkillPrompts) == 0 {
 		return a.staticSystemPrompt
 	}
-	var frags []string
-	for _, f := range a.dynamicSkillPrompts {
-		if f != "" {
-			frags = append(frags, f)
+
+	// Collect loaded skill names from dynamicSkillTools keys
+	var loadedSkillNames []string
+	if a.dynamicSkillTools != nil {
+		for name := range a.dynamicSkillTools {
+			loadedSkillNames = append(loadedSkillNames, name)
 		}
 	}
-	if len(frags) == 0 {
+
+	// Build skills section with discovery information
+	skillsSection := a.buildSkillsSection(
+		loadedSkillNames,
+		a.skillRegistry,
+		a.dynamicSkillPrompts,
+		a.injectSkillSummary,
+		a.injectAvailableSkillsList,
+		a.injectSkillInstructions,
+	)
+
+	if skillsSection == "" {
 		return a.staticSystemPrompt
 	}
-	return a.staticSystemPrompt + "\n\n# Skills\n" + strings.Join(frags, "\n\n")
+
+	return a.staticSystemPrompt + "\n\n" + skillsSection
 }
 
 // getEffectiveTools returns tools for this request. When skillSessionStore is set, uses static tools + session-loaded skills so multiple users sharing the agent do not affect each other.
@@ -674,6 +833,7 @@ func (a *Agent) getEffectiveTools(ctx context.Context) []interfaces.Tool {
 }
 
 // getEffectiveSystemPrompt returns system prompt for this request. When skillSessionStore is set, uses static prompt + session-loaded skill fragments.
+// Now includes skill discovery information (loaded skills summary and available-to-load list) when enabled.
 func (a *Agent) getEffectiveSystemPrompt(ctx context.Context) string {
 	if a.skillSessionStore == nil {
 		return a.systemPrompt
@@ -700,20 +860,34 @@ func (a *Agent) getEffectiveSystemPrompt(ctx context.Context) string {
 	if a.skillRegistry == nil {
 		return base
 	}
-	var frags []string
+
+	// Build prompt fragments map for Instructions section
+	promptFragments := make(map[string]string)
 	for _, name := range sessionSkills {
 		skill, ok := a.skillRegistry.Get(name)
 		if !ok {
 			continue
 		}
 		if f := strings.TrimSpace(skill.PromptFragment()); f != "" {
-			frags = append(frags, f)
+			promptFragments[name] = f
 		}
 	}
-	if len(frags) == 0 {
+
+	// Build skills section with discovery information
+	skillsSection := a.buildSkillsSection(
+		sessionSkills,
+		a.skillRegistry,
+		promptFragments,
+		a.injectSkillSummary,
+		a.injectAvailableSkillsList,
+		a.injectSkillInstructions,
+	)
+
+	if skillsSection == "" {
 		return base
 	}
-	return base + "\n\n# Skills\n" + strings.Join(frags, "\n\n")
+
+	return base + "\n\n" + skillsSection
 }
 
 // WithMCPURLs adds MCP servers from URL strings
