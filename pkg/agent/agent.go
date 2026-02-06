@@ -819,14 +819,11 @@ func (a *Agent) getEffectiveSystemPrompt(ctx context.Context) string {
 			sessionSkills = a.skillSessionStore.GetLoadedSkills(ctx)
 		}
 	}
-	if len(sessionSkills) == 0 {
-		return base
-	}
 	if a.skillRegistry == nil {
 		return base
 	}
 
-	// Build prompt fragments map for Instructions section
+	// Build prompt fragments map for Instructions section (empty when sessionSkills is empty)
 	promptFragments := make(map[string]string)
 	for _, name := range sessionSkills {
 		skill, ok := a.skillRegistry.Get(name)

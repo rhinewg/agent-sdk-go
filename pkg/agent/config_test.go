@@ -361,6 +361,35 @@ func TestSkillDiscoveryInjectionWithSessionStore(t *testing.T) {
 	assert.Contains(t, prompt, "- test_skill:")
 }
 
+func TestSkillDiscoveryInjectionWithSessionStoreEmptySession(t *testing.T) {
+	// Session has no loaded skills; prompt should still include "Available to load" so model can discover skills.
+	registry := NewSkillRegistry()
+	RegisterBuiltinSkills(registry)
+	registry.Register(NewSkill("extra_skill", "An extra skill", nil, "Use when needed."))
+
+	llm := &TestMockLLM{llmName: "test"}
+	store := NewDefaultSkillSessionStore(DefaultSessionKey)
+	a, err := NewAgent(
+		WithLLM(llm),
+		WithName("test"),
+		WithSkillRegistry(registry),
+		WithSkillSessionStore(store),
+		WithSystemPrompt("You are a helper."),
+	)
+	assert.NoError(t, err)
+	ctx := context.Background()
+	ctx = memory.WithConversationID(ctx, "conv-empty")
+
+	// Session has no skills loaded
+	prompt := a.getEffectiveSystemPrompt(ctx)
+
+	// Should still contain Available to load so model can discover what to load
+	assert.Contains(t, prompt, "# Skills")
+	assert.Contains(t, prompt, "## Available to load")
+	assert.Contains(t, prompt, "- calculator:")
+	assert.Contains(t, prompt, "- extra_skill:")
+}
+
 func TestListAvailableSkillsTool(t *testing.T) {
 	registry := NewSkillRegistry()
 	RegisterBuiltinSkills(registry)
