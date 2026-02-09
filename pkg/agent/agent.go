@@ -63,12 +63,13 @@ type Agent struct {
 	guardrails           interfaces.Guardrails
 	logger               logging.Logger // Logger for the agent
 	systemPrompt         string
-	name                 string                   // Name of the agent, e.g., "PlatformOps", "Math", "Research"
-	description          string                   // Description of what the agent does
-	requirePlanApproval  bool                     // New field to control whether execution plans require approval
-	planStore            *executionplan.Store     // Store for execution plans
-	planGenerator        *executionplan.Generator // Generator for execution plans
-	planExecutor         *executionplan.Executor  // Executor for execution plans
+	name                 string                                  // Name of the agent, e.g., "PlatformOps", "Math", "Research"
+	description          string                                  // Description of what the agent does
+	requirePlanApproval  bool                                    // New field to control whether execution plans require approval
+	planStore            *executionplan.Store                    // Store for execution plans (global within this agent)
+	planSessionStore     executionplan.ExecutionPlanSessionStore // Optional session-scoped store for execution plans
+	planGenerator        *executionplan.Generator                // Generator for execution plans
+	planExecutor         *executionplan.Executor                 // Executor for execution plans
 	generatedAgentConfig *AgentConfig
 	generatedTaskConfigs TaskConfigs
 	responseFormat       *interfaces.ResponseFormat // Response format for the agent
@@ -514,6 +515,15 @@ func WithSkillSessionStore(store interfaces.SkillSessionStore) Option {
 	}
 }
 
+// WithExecutionPlanSessionStore sets a session-scoped store for execution plans so that
+// multiple users or conversations sharing one agent do not see each other's plans.
+// The store implementation is responsible for deriving the session key from context.
+func WithExecutionPlanSessionStore(store executionplan.ExecutionPlanSessionStore) Option {
+	return func(a *Agent) {
+		a.planSessionStore = store
+	}
+}
+
 // WithSkillDiscoveryInjection configures whether to inject skill discovery information in the system prompt.
 // This enables LLM to discover and match skills for retrieval and usage.
 //
@@ -756,45 +766,54 @@ func (a *Agent) recomputeMergedSystemPromptLocked() string {
 }
 
 // getEffectiveTools returns tools for this request. When skillSessionStore is set, uses static tools + session-loaded skills so multiple users sharing the agent do not affect each other.
+// Plan tools (generate_execution_plan, execute_execution_plan) are built-in and injected only when planStore is in use; they do not depend on skill configuration.
 func (a *Agent) getEffectiveTools(ctx context.Context) []interfaces.Tool {
+	var list []interfaces.Tool
 	if a.skillSessionStore == nil {
-		return a.tools
-	}
-	a.skillsMu.RLock()
-	base := a.staticTools
-	dynamicSkills := a.dynamicSkillTools
-	a.skillsMu.RUnlock()
-	if base == nil {
-		return a.tools
-	}
-	sessionSkills := a.skillSessionStore.GetLoadedSkills(ctx)
-	// Auto-load config.Skills only on first request (session not yet initialized).
-	// Once initialized (even if user unloaded all skills), don't auto-reload to respect user's choice.
-	if len(sessionSkills) == 0 && len(dynamicSkills) > 0 {
-		// Check if session has been initialized (prevents re-auto-load after user unloads)
-		if store, ok := a.skillSessionStore.(*DefaultSkillSessionStore); ok && !store.IsInitialized(ctx) {
-			for skillName := range dynamicSkills {
-				a.skillSessionStore.AddSkill(ctx, skillName)
+		list = a.tools
+	} else {
+		a.skillsMu.RLock()
+		base := a.staticTools
+		dynamicSkills := a.dynamicSkillTools
+		a.skillsMu.RUnlock()
+		if base == nil {
+			list = a.tools
+		} else {
+			sessionSkills := a.skillSessionStore.GetLoadedSkills(ctx)
+			// Auto-load config.Skills only on first request (session not yet initialized).
+			// Once initialized (even if user unloaded all skills), don't auto-reload to respect user's choice.
+			if len(sessionSkills) == 0 && len(dynamicSkills) > 0 {
+				// Check if session has been initialized (prevents re-auto-load after user unloads)
+				if store, ok := a.skillSessionStore.(*DefaultSkillSessionStore); ok && !store.IsInitialized(ctx) {
+					for skillName := range dynamicSkills {
+						a.skillSessionStore.AddSkill(ctx, skillName)
+					}
+					sessionSkills = a.skillSessionStore.GetLoadedSkills(ctx)
+				}
 			}
-			sessionSkills = a.skillSessionStore.GetLoadedSkills(ctx)
+			if len(sessionSkills) == 0 {
+				list = base
+			} else if a.skillRegistry == nil {
+				list = base
+			} else {
+				merged := make([]interfaces.Tool, 0, len(base)+32)
+				merged = append(merged, base...)
+				for _, name := range sessionSkills {
+					skill, ok := a.skillRegistry.Get(name)
+					if !ok {
+						continue
+					}
+					merged = append(merged, skill.Tools()...)
+				}
+				list = deduplicateTools(merged)
+			}
 		}
 	}
-	if len(sessionSkills) == 0 {
-		return base
+	// Built-in plan tools: only when plan store is in use, independent of skills
+	if a.planStore != nil {
+		list = deduplicateTools(append(list, DefaultPlanTools(a)...))
 	}
-	if a.skillRegistry == nil {
-		return base
-	}
-	merged := make([]interfaces.Tool, 0, len(base)+32)
-	merged = append(merged, base...)
-	for _, name := range sessionSkills {
-		skill, ok := a.skillRegistry.Get(name)
-		if !ok {
-			continue
-		}
-		merged = append(merged, skill.Tools()...)
-	}
-	return deduplicateTools(merged)
+	return list
 }
 
 // getEffectiveSystemPrompt returns system prompt for this request. When skillSessionStore is set, uses static prompt + session-loaded skill fragments.
@@ -1066,6 +1085,8 @@ func validateLocalAgent(agent *Agent) (*Agent, error) {
 	agent.planStore = executionplan.NewStore()
 	agent.planGenerator = executionplan.NewGenerator(agent.llm, allTools, agent.systemPrompt, agent.requirePlanApproval)
 	agent.planExecutor = executionplan.NewExecutor(allTools)
+
+	// Plan tools are built-in and injected in getEffectiveTools() only when planStore is in use; they are not added to agent.tools or staticTools and do not depend on skill configuration.
 
 	return agent, nil
 }
@@ -1752,9 +1773,33 @@ func (a *Agent) extractPlanAction(input string) (string, string, string) {
 
 // handlePlanAction handles actions related to an existing plan
 func (a *Agent) handlePlanAction(ctx context.Context, taskID, action, input string) (string, error) {
-	plan, exists := a.planStore.GetPlanByTaskID(taskID)
-	if !exists {
-		return "", fmt.Errorf("plan with task ID %s not found", taskID)
+	var plan *executionplan.ExecutionPlan
+
+	if taskID == "latest" {
+		// Resolve "latest" to the most recent pending plan in the current session
+		var err error
+		plan, err = a.getPlanForExecution(ctx, "latest")
+		if err != nil {
+			return "", err
+		}
+		if plan == nil {
+			return "", fmt.Errorf("no pending plan found in this session; create a plan first or specify a task_id")
+		}
+	} else {
+		var exists bool
+		if a.planSessionStore != nil {
+			if p, ok := a.planSessionStore.GetPlanByTaskID(ctx, taskID); ok {
+				plan, exists = p, true
+			}
+		}
+		if !exists && a.planStore != nil {
+			if p, ok := a.planStore.GetPlanByTaskID(taskID); ok {
+				plan, exists = p, true
+			}
+		}
+		if !exists || plan == nil {
+			return "", fmt.Errorf("plan with task ID %s not found", taskID)
+		}
 	}
 
 	switch action {
@@ -1786,8 +1831,10 @@ func (a *Agent) approvePlan(ctx context.Context, plan *executionplan.ExecutionPl
 		}
 	}
 
-	// Execute the plan
-	result, err := a.planExecutor.ExecutePlan(ctx, plan)
+	// Execute the plan with effective tools (same as executePlanDirect) so session-loaded skills are available
+	effectiveTools := a.getEffectiveTools(ctx)
+	exec := executionplan.NewExecutor(effectiveTools)
+	result, err := exec.ExecutePlan(ctx, plan)
 	if err != nil {
 		return "", fmt.Errorf("failed to execute plan: %w", err)
 	}
@@ -1802,6 +1849,26 @@ func (a *Agent) approvePlan(ctx context.Context, plan *executionplan.ExecutionPl
 		}
 	}
 
+	return result, nil
+}
+
+// executePlanDirect runs the plan without requiring user approval (used by execute_execution_plan tool).
+// Uses getEffectiveTools(ctx) so execution sees the same tools as the current session (e.g. session-loaded skills like mcp_web_search), avoiding "unknown tool" when the plan references them.
+func (a *Agent) executePlanDirect(ctx context.Context, plan *executionplan.ExecutionPlan) (string, error) {
+	effectiveTools := a.getEffectiveTools(ctx)
+	exec := executionplan.NewExecutor(effectiveTools)
+	result, err := exec.ExecutePlanDirect(ctx, plan)
+	if err != nil {
+		return "", fmt.Errorf("failed to execute plan: %w", err)
+	}
+	if a.memory != nil {
+		if err := a.memory.AddMessage(ctx, interfaces.Message{
+			Role:    interfaces.MessageRoleAssistant,
+			Content: result,
+		}); err != nil {
+			return "", fmt.Errorf("failed to add execution result to memory: %w", err)
+		}
+	}
 	return result, nil
 }
 
@@ -1823,8 +1890,13 @@ func (a *Agent) modifyPlan(ctx context.Context, plan *executionplan.ExecutionPla
 		return "", fmt.Errorf("failed to modify plan: %w", err)
 	}
 
-	// Update the plan in the store
-	a.planStore.StorePlan(modifiedPlan)
+	// Update the plan in the appropriate store(s)
+	if a.planSessionStore != nil {
+		a.planSessionStore.StorePlan(ctx, modifiedPlan)
+	}
+	if a.planStore != nil {
+		a.planStore.StorePlan(modifiedPlan)
+	}
 
 	// Format the modified plan
 	formattedPlan := executionplan.FormatExecutionPlan(modifiedPlan)
@@ -1865,8 +1937,13 @@ func (a *Agent) runWithExecutionPlan(ctx context.Context, input string) (string,
 		return "", fmt.Errorf("failed to generate execution plan: %w", err)
 	}
 
-	// Store the plan
-	a.planStore.StorePlan(plan)
+	// Store the plan in the appropriate store(s)
+	if a.planSessionStore != nil {
+		a.planSessionStore.StorePlan(ctx, plan)
+	}
+	if a.planStore != nil {
+		a.planStore.StorePlan(plan)
+	}
 
 	// Format the plan for display
 	formattedPlan := executionplan.FormatExecutionPlan(plan)
