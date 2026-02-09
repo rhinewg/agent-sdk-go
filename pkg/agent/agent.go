@@ -142,6 +142,9 @@ func WithDataStore(datastore interfaces.DataStore) Option {
 func WithTools(tools ...interfaces.Tool) Option {
 	return func(a *Agent) {
 		a.tools = deduplicateTools(append(a.tools, tools...))
+		if a.skillSessionStore != nil {
+			a.staticTools = deduplicateTools(append(a.staticTools, tools...))
+		}
 	}
 }
 
@@ -498,7 +501,7 @@ func WithLazyMCPConfigs(configs []LazyMCPConfig) Option {
 func WithSkillRegistry(registry interfaces.SkillRegistry) Option {
 	return func(a *Agent) {
 		a.skillRegistry = registry
-		a.tools = deduplicateTools(append(a.tools, DefaultSkillTools(a)...))
+		WithTools(DefaultSkillTools(a)...)(a)
 		// Enable skill discovery injection by default when registry is set
 		a.injectSkillSummary = true
 		a.injectAvailableSkillsList = true
@@ -521,6 +524,7 @@ func WithSkillSessionStore(store interfaces.SkillSessionStore) Option {
 func WithExecutionPlanSessionStore(store executionplan.ExecutionPlanSessionStore) Option {
 	return func(a *Agent) {
 		a.planSessionStore = store
+		WithTools(DefaultPlanTools(a)...)(a)
 	}
 }
 
@@ -544,22 +548,6 @@ func WithSkillDiscoveryInjection(injectSummary, injectAvailable, injectInstructi
 		a.injectAvailableSkillsList = injectAvailable
 		a.injectSkillInstructions = injectInstructions
 	}
-}
-
-// getMergedTools returns staticTools + all dynamic skill tools (deduplicated). Used after LoadSkill/UnloadSkill.
-// If dynamic skills are not in use (staticTools == nil), returns a.tools unchanged.
-func (a *Agent) getMergedTools() []interfaces.Tool {
-	a.skillsMu.RLock()
-	defer a.skillsMu.RUnlock()
-	if a.staticTools == nil {
-		return a.tools
-	}
-	merged := make([]interfaces.Tool, 0, len(a.staticTools)+32)
-	merged = append(merged, a.staticTools...)
-	for _, skillTools := range a.dynamicSkillTools {
-		merged = append(merged, skillTools...)
-	}
-	return deduplicateTools(merged)
 }
 
 // buildSkillsSection builds the "# Skills" section of the system prompt with skill discovery information.
@@ -776,42 +764,36 @@ func (a *Agent) getEffectiveTools(ctx context.Context) []interfaces.Tool {
 		base := a.staticTools
 		dynamicSkills := a.dynamicSkillTools
 		a.skillsMu.RUnlock()
-		if base == nil {
-			list = a.tools
-		} else {
-			sessionSkills := a.skillSessionStore.GetLoadedSkills(ctx)
-			// Auto-load config.Skills only on first request (session not yet initialized).
-			// Once initialized (even if user unloaded all skills), don't auto-reload to respect user's choice.
-			if len(sessionSkills) == 0 && len(dynamicSkills) > 0 {
-				// Check if session has been initialized (prevents re-auto-load after user unloads)
-				if store, ok := a.skillSessionStore.(*DefaultSkillSessionStore); ok && !store.IsInitialized(ctx) {
-					for skillName := range dynamicSkills {
-						a.skillSessionStore.AddSkill(ctx, skillName)
-					}
-					sessionSkills = a.skillSessionStore.GetLoadedSkills(ctx)
+
+		sessionSkills := a.skillSessionStore.GetLoadedSkills(ctx)
+		// Auto-load config.Skills only on first request (session not yet initialized).
+		// Once initialized (even if user unloaded all skills), don't auto-reload to respect user's choice.
+		if len(sessionSkills) == 0 && len(dynamicSkills) > 0 {
+			// Check if session has been initialized (prevents re-auto-load after user unloads)
+			if store, ok := a.skillSessionStore.(*DefaultSkillSessionStore); ok && !store.IsInitialized(ctx) {
+				for skillName := range dynamicSkills {
+					a.skillSessionStore.AddSkill(ctx, skillName)
 				}
-			}
-			if len(sessionSkills) == 0 {
-				list = base
-			} else if a.skillRegistry == nil {
-				list = base
-			} else {
-				merged := make([]interfaces.Tool, 0, len(base)+32)
-				merged = append(merged, base...)
-				for _, name := range sessionSkills {
-					skill, ok := a.skillRegistry.Get(name)
-					if !ok {
-						continue
-					}
-					merged = append(merged, skill.Tools()...)
-				}
-				list = deduplicateTools(merged)
+				sessionSkills = a.skillSessionStore.GetLoadedSkills(ctx)
 			}
 		}
-	}
-	// Built-in plan tools: only when plan store is in use, independent of skills
-	if a.planStore != nil {
-		list = deduplicateTools(append(list, DefaultPlanTools(a)...))
+		if len(sessionSkills) == 0 {
+			list = base
+		} else if a.skillRegistry == nil {
+			list = base
+		} else {
+			merged := make([]interfaces.Tool, 0, len(base)+32)
+			merged = append(merged, base...)
+			for _, name := range sessionSkills {
+				skill, ok := a.skillRegistry.Get(name)
+				if !ok {
+					continue
+				}
+				merged = append(merged, skill.Tools()...)
+			}
+			list = deduplicateTools(merged)
+		}
+
 	}
 	return list
 }
