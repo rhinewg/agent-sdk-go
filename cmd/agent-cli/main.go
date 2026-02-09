@@ -12,6 +12,7 @@ import (
 
 	"github.com/Ingenimax/agent-sdk-go/pkg/agent"
 	"github.com/Ingenimax/agent-sdk-go/pkg/config"
+	"github.com/Ingenimax/agent-sdk-go/pkg/executionplan"
 	"github.com/Ingenimax/agent-sdk-go/pkg/interfaces"
 	"github.com/Ingenimax/agent-sdk-go/pkg/llm/anthropic"
 	"github.com/Ingenimax/agent-sdk-go/pkg/llm/gemini"
@@ -731,7 +732,10 @@ func runAgent() {
 		if variables == nil {
 			variables = make(map[string]string)
 		}
-		opts := []agent.Option{agent.WithLLM(llm)}
+		opts := []agent.Option{
+			agent.WithLLM(llm),
+			agent.WithExecutionPlanSessionStore(executionplan.NewDefaultExecutionPlanSessionStore(agent.DefaultSessionKey)),
+		}
 		registry, err := buildCLISkillRegistry(skillsDir)
 		if err != nil {
 			log.Fatalf("❌ Failed to build skill registry: %v", err)
@@ -858,7 +862,10 @@ func executeTask() {
 	config := loadConfig()
 	llm := createLLM(config)
 
-	opts := []agent.Option{agent.WithLLM(llm)}
+	opts := []agent.Option{
+		agent.WithLLM(llm),
+		agent.WithExecutionPlanSessionStore(executionplan.NewDefaultExecutionPlanSessionStore(agent.DefaultSessionKey)),
+	}
 	if skillsDir != "" {
 		registry, err := buildCLISkillRegistry(skillsDir)
 		if err != nil {
@@ -924,6 +931,7 @@ func startInteractiveChat() {
 		opts := []agent.Option{
 			agent.WithLLM(llm),
 			agent.WithSkillSessionStore(agent.NewDefaultSkillSessionStore(agent.DefaultSessionKey)),
+			agent.WithExecutionPlanSessionStore(executionplan.NewDefaultExecutionPlanSessionStore(agent.DefaultSessionKey)),
 		}
 		registry, err := buildCLISkillRegistry(skillsDir)
 		if err != nil {
@@ -1905,6 +1913,9 @@ func createAgent(config *CLIConfig) *agent.Agent {
 			options = append(options, agent.WithTracer(tracer))
 		}
 	}
+
+	// Session-scoped execution plan store so plan tools and approval flow are isolated per CLI session (conversation_id from config).
+	options = append(options, agent.WithExecutionPlanSessionStore(executionplan.NewDefaultExecutionPlanSessionStore(agent.DefaultSessionKey)))
 
 	agentInstance, err := agent.NewAgent(options...)
 	if err != nil {

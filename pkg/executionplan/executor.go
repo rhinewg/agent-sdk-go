@@ -26,12 +26,20 @@ func NewExecutor(tools []interfaces.Tool) *Executor {
 	}
 }
 
-// ExecutePlan executes an approved execution plan
+// ExecutePlan executes an approved execution plan (returns error if plan is not approved).
 func (e *Executor) ExecutePlan(ctx context.Context, plan *ExecutionPlan) (string, error) {
 	if !plan.UserApproved {
 		return "", fmt.Errorf("execution plan has not been approved by the user")
 	}
+	return e.executeSteps(ctx, plan)
+}
 
+// ExecutePlanDirect runs the plan without requiring UserApproved (e.g. when triggered by execute_execution_plan tool).
+func (e *Executor) ExecutePlanDirect(ctx context.Context, plan *ExecutionPlan) (string, error) {
+	return e.executeSteps(ctx, plan)
+}
+
+func (e *Executor) executeSteps(ctx context.Context, plan *ExecutionPlan) (string, error) {
 	// Update status to executing
 	plan.Status = StatusExecuting
 
