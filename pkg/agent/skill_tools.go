@@ -20,7 +20,7 @@ func NewLoadSkillTool(a *Agent) interfaces.Tool {
 func (t *loadSkillTool) Name() string { return "load_skill" }
 
 func (t *loadSkillTool) Description() string {
-	return "Load a skill by name so the agent can use its tools. Use when you need a capability that is not yet loaded. Pass the skill name (e.g. calculator, web_research)."
+	return "Load a skill by name so the agent can use its tools. Use when you need a capability that is not yet loaded. Pass the skill name (e.g. calculator)."
 }
 
 func (t *loadSkillTool) Parameters() map[string]interfaces.ParameterSpec {

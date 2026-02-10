@@ -1069,7 +1069,13 @@ func validateLocalAgent(agent *Agent) (*Agent, error) {
 	agent.planExecutor = executionplan.NewExecutor(allTools)
 
 	// Plan tools are built-in and injected in getEffectiveTools() only when planStore is in use; they are not added to agent.tools or staticTools and do not depend on skill configuration.
-
+	agent.skillsMu.Lock()
+	if len(agent.staticTools) > 0 {
+		// 简单更新：直接复制当前 a.tools（此时已包含 MCP 工具）
+		agent.staticTools = make([]interfaces.Tool, len(agent.tools))
+		copy(agent.staticTools, agent.tools)
+	}
+	agent.skillsMu.Unlock()
 	return agent, nil
 }
 
