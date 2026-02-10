@@ -2304,6 +2304,26 @@ func (a *Agent) GetSubAgents() []*Agent {
 	return a.subAgents
 }
 
+// GetSubAgentByName returns the first sub-agent with the given name, or nil if not found
+func (a *Agent) GetSubAgentByName(name string) *Agent {
+	for _, sub := range a.subAgents {
+		if sub != nil && sub.name == name {
+			return sub
+		}
+	}
+	return nil
+}
+
+// SetCustomRunFunction sets the custom run function after creation (e.g. for vision pre-routing)
+func (a *Agent) SetCustomRunFunction(fn CustomRunFunction) {
+	a.customRunFunc = fn
+}
+
+// SetCustomRunStreamFunction sets the custom stream run function after creation (e.g. for vision pre-routing)
+func (a *Agent) SetCustomRunStreamFunction(fn CustomRunStreamFunction) {
+	a.customRunStreamFunc = fn
+}
+
 // GetLogger returns the logger instance (for use in custom functions)
 func (a *Agent) GetLogger() logging.Logger {
 	return a.logger
@@ -2462,10 +2482,11 @@ func createSubAgentsFromConfig(subAgentConfigs map[string]AgentConfig, variables
 			WithName(name),
 		}
 
-		// Inherit infrastructure dependencies (LLM, memory, tracer, logger) but NOT tools
-		if llm != nil {
+		// Inherit LLM only when sub-agent has no own llm_provider (so sub-agents can define their own model in YAML)
+		if config.LLMProvider == nil && llm != nil {
 			agentOptions = append(agentOptions, WithLLM(llm))
 		}
+		// Inherit other infrastructure dependencies (memory, tracer, logger) but NOT tools
 		if memory != nil {
 			agentOptions = append(agentOptions, WithMemory(memory))
 		}

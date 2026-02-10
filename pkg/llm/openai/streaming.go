@@ -687,9 +687,9 @@ func (c *OpenAIClient) GenerateWithToolsStream(
 			// Mark that we have tool calls to execute
 			hasExecutedToolCalls = true
 
-			// Process each tool call
+			// Process each tool call - must add exactly one tool message per tool_call for API compliance
 			for _, toolCall := range assistantResponse.ToolCalls {
-				// Find the matching tool
+				var result string
 				var foundTool interfaces.Tool
 				for _, tool := range tools {
 					if tool.Name() == toolCall.Function.Name {
@@ -702,17 +702,18 @@ func (c *OpenAIClient) GenerateWithToolsStream(
 					c.logger.Error(ctx, "Tool not found", map[string]interface{}{
 						"tool_name": toolCall.Function.Name,
 					})
-					continue
-				}
-
-				// Execute the tool
-				result, err := foundTool.Execute(ctx, toolCall.Function.Arguments)
-				if err != nil {
-					c.logger.Error(ctx, "Tool execution error", map[string]interface{}{
-						"tool_name": toolCall.Function.Name,
-						"error":     err.Error(),
-					})
-					result = fmt.Sprintf("Error executing tool: %v", err)
+					result = fmt.Sprintf("Error: tool not found: %s", toolCall.Function.Name)
+				} else {
+					// Execute the tool
+					var err error
+					result, err = foundTool.Execute(ctx, toolCall.Function.Arguments)
+					if err != nil {
+						c.logger.Error(ctx, "Tool execution error", map[string]interface{}{
+							"tool_name": toolCall.Function.Name,
+							"error":     err.Error(),
+						})
+						result = fmt.Sprintf("Error executing tool: %v", err)
+					}
 				}
 
 				// Send tool result event
@@ -730,28 +731,19 @@ func (c *OpenAIClient) GenerateWithToolsStream(
 					},
 				}
 
-				// Add the tool result to the conversation
+				// Add the tool result to the conversation (required: every assistant tool_call must have a tool message)
 				c.logger.Debug(ctx, "Adding tool result to conversation", map[string]interface{}{
 					"tool_call_id":  toolCall.ID,
 					"id_length":     len(toolCall.ID),
 					"tool_name":     toolCall.Function.Name,
 					"result_length": len(result),
 				})
-
-				// Ensure tool call ID is not swapped with result
 				if len(toolCall.ID) > 40 {
-					c.logger.Error(ctx, "Tool call ID too long", map[string]interface{}{
-						"id":        toolCall.ID,
+					c.logger.Warn(ctx, "Tool call ID unusually long", map[string]interface{}{
 						"id_length": len(toolCall.ID),
 					})
-					continue
 				}
-
-				// Create tool message - correct parameter order: content first, then tool_call_id
 				toolMessage := openai.ToolMessage(result, toolCall.ID)
-				c.logger.Debug(ctx, "Created tool message", map[string]interface{}{
-					"message_type": "tool",
-				})
 				messages = append(messages, toolMessage)
 			}
 
