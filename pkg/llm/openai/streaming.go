@@ -19,10 +19,19 @@ func (c *OpenAIClient) GenerateStream(
 	prompt string,
 	options ...interfaces.GenerateOption,
 ) (<-chan interfaces.StreamEvent, error) {
+	temp := 0.7
+	if c.defaultTemperature != nil {
+		temp = *c.defaultTemperature
+	}
+	topP := 1.0
+	if c.defaultTopP != nil {
+		topP = *c.defaultTopP
+	}
 	// Apply options
 	params := &interfaces.GenerateOptions{
 		LLMConfig: &interfaces.LLMConfig{
-			Temperature: 0.7,
+			Temperature: temp,
+			TopP:        topP,
 		},
 	}
 
@@ -261,10 +270,19 @@ func (c *OpenAIClient) GenerateWithToolsStream(
 	tools []interfaces.Tool,
 	options ...interfaces.GenerateOption,
 ) (<-chan interfaces.StreamEvent, error) {
+	temp := 0.7
+	if c.defaultTemperature != nil {
+		temp = *c.defaultTemperature
+	}
+	topP := 1.0
+	if c.defaultTopP != nil {
+		topP = *c.defaultTopP
+	}
 	// Apply options
 	params := &interfaces.GenerateOptions{
 		LLMConfig: &interfaces.LLMConfig{
-			Temperature: 0.7,
+			Temperature: temp,
+			TopP:        topP,
 		},
 	}
 

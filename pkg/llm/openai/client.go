@@ -27,14 +27,16 @@ const organizationKey contextKey = "organization"
 
 // OpenAIClient implements the LLM interface for OpenAI
 type OpenAIClient struct {
-	Client          openai.Client
-	ChatService     openai.ChatService
-	ResponseService openai.Client
-	Model           string
-	apiKey          string
-	baseURL         string
-	logger          logging.Logger
-	retryExecutor   *retry.Executor
+	Client            openai.Client
+	ChatService       openai.ChatService
+	ResponseService   openai.Client
+	Model             string
+	apiKey            string
+	baseURL           string
+	logger            logging.Logger
+	retryExecutor     *retry.Executor
+	defaultTemperature *float64 // optional client-level default; nil = use 0.7
+	defaultTopP       *float64 // optional client-level default; nil = use 1.0
 }
 
 // Option represents an option for configuring the OpenAI client
@@ -105,6 +107,24 @@ func WithBaseURL(baseURL string) Option {
 	}
 }
 
+// WithDefaultTemperature sets the default temperature for all generation calls (0.0–1.0).
+// Can be overridden per-call via GenerateOption. Reasoning models will still be forced to 1.0.
+func WithDefaultTemperature(temperature float64) Option {
+	return func(c *OpenAIClient) {
+		t := temperature
+		c.defaultTemperature = &t
+	}
+}
+
+// WithDefaultTopP sets the default top_p for all generation calls.
+// Can be overridden per-call via GenerateOption. Ignored for reasoning models.
+func WithDefaultTopP(topP float64) Option {
+	return func(c *OpenAIClient) {
+		p := topP
+		c.defaultTopP = &p
+	}
+}
+
 // NewClient creates a new OpenAI client
 func NewClient(apiKey string, options ...Option) *OpenAIClient {
 	// Create client with default options
@@ -137,10 +157,19 @@ func (c *OpenAIClient) Generate(ctx context.Context, prompt string, options ...i
 
 // generateInternal performs the actual generation and returns the full response
 func (c *OpenAIClient) generateInternal(ctx context.Context, prompt string, options ...interfaces.GenerateOption) (*interfaces.LLMResponse, error) {
+	temp := 0.7
+	if c.defaultTemperature != nil {
+		temp = *c.defaultTemperature
+	}
+	topP := 1.0
+	if c.defaultTopP != nil {
+		topP = *c.defaultTopP
+	}
 	// Apply options
 	params := &interfaces.GenerateOptions{
 		LLMConfig: &interfaces.LLMConfig{
-			Temperature: 0.7,
+			Temperature: temp,
+			TopP:        topP,
 		},
 	}
 
@@ -408,9 +437,17 @@ func (c *OpenAIClient) GenerateWithTools(ctx context.Context, prompt string, too
 
 	// Set default values only if they're not provided
 	if params.LLMConfig == nil {
+		temp := 0.7
+		if c.defaultTemperature != nil {
+			temp = *c.defaultTemperature
+		}
+		topP := 1.0
+		if c.defaultTopP != nil {
+			topP = *c.defaultTopP
+		}
 		params.LLMConfig = &interfaces.LLMConfig{
-			Temperature:      0.7,
-			TopP:             1.0,
+			Temperature:      temp,
+			TopP:             topP,
 			FrequencyPenalty: 0.0,
 			PresencePenalty:  0.0,
 		}
