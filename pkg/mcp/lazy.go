@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -35,9 +36,63 @@ var globalServerCache = &LazyMCPServerCache{
 	logger:         logging.New(),
 }
 
+// connectionErrorSubstrings are error message substrings that indicate a broken connection;
+// when seen, the cached server is invalidated so the next call will reconnect.
+var connectionErrorSubstrings = []string{
+	"connection reset", "connection refused", "connection closed",
+	"eof", "unexpected eof", "unexpected EOF",
+	"timeout", "timed out", "i/o timeout",
+	"broken pipe", "use of closed network connection",
+	"temporary failure",
+	"no such host", "network is unreachable",
+	"stream error", "stream closed",
+}
+
+// isConnectionError returns true if err indicates a broken or unreachable connection,
+// so the caller can invalidate the cached server and allow reconnection on next use.
+func isConnectionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, sub := range connectionErrorSubstrings {
+		if strings.Contains(msg, sub) {
+			return true
+		}
+	}
+	// Unwrap once for wrapped errors (e.g. fmt.Errorf("...: %w", err))
+	if u := errors.Unwrap(err); u != nil {
+		return isConnectionError(u)
+	}
+	return false
+}
+
+// serverKeyFromConfig returns the cache key for a LazyMCPServerConfig (must match getOrCreateServer).
+func serverKeyFromConfig(config LazyMCPServerConfig) string {
+	return fmt.Sprintf("%s:%s:%v", config.Type, config.Name, config.Command)
+}
+
+// InvalidateServer removes the server from the cache and closes it.
+// After this, the next getOrCreateServer for the same key will create a new connection.
+// Call this when a connection-like error occurs (e.g. SSE dropped) so the next call reconnects.
+func (cache *LazyMCPServerCache) InvalidateServer(serverKey string, server interfaces.MCPServer) {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if _, exists := cache.servers[serverKey]; exists {
+		delete(cache.servers, serverKey)
+		delete(cache.serverMetadata, serverKey)
+		cache.logger.Info(context.Background(), "MCP server invalidated due to connection error, will reconnect on next use", map[string]interface{}{
+			"server_key": serverKey,
+		})
+	}
+	if server != nil {
+		_ = server.Close()
+	}
+}
+
 // getOrCreateServer gets an existing server or creates a new one
 func (cache *LazyMCPServerCache) getOrCreateServer(ctx context.Context, config LazyMCPServerConfig) (interfaces.MCPServer, error) {
-	serverKey := fmt.Sprintf("%s:%s:%v", config.Type, config.Name, config.Command)
+	serverKey := serverKeyFromConfig(config)
 
 	// Try to get existing server (read lock)
 	cache.mu.RLock()
@@ -240,7 +295,7 @@ func (t *LazyMCPTool) getServer(ctx context.Context) (interfaces.MCPServer, erro
 
 	// Load server metadata if not already loaded
 	if t.serverInfo == nil {
-		serverKey := fmt.Sprintf("%s:%s:%v", t.serverConfig.Type, t.serverConfig.Name, t.serverConfig.Command)
+		serverKey := serverKeyFromConfig(t.serverConfig)
 		globalServerCache.mu.RLock()
 		if metadata, exists := globalServerCache.serverMetadata[serverKey]; exists {
 			t.serverInfo = metadata
@@ -270,6 +325,9 @@ func (t *LazyMCPTool) discoverSchema(ctx context.Context) error {
 	// List tools from the server to find our tool's schema
 	tools, err := server.ListTools(ctx)
 	if err != nil {
+		if isConnectionError(err) {
+			globalServerCache.InvalidateServer(serverKeyFromConfig(t.serverConfig), server)
+		}
 		return fmt.Errorf("failed to list tools from MCP server: %w", err)
 	}
 
@@ -337,6 +395,9 @@ func (t *LazyMCPTool) Run(ctx context.Context, input string) (string, error) {
 	// Call the tool on the MCP server
 	resp, err := server.CallTool(ctx, t.name, args)
 	if err != nil {
+		if isConnectionError(err) {
+			globalServerCache.InvalidateServer(serverKeyFromConfig(t.serverConfig), server)
+		}
 		t.logger.Error(ctx, "[MCP TOOL ERROR] MCP tool call failed with error", map[string]interface{}{
 			"tool_name":   t.name,
 			"server_name": t.serverConfig.Name,
@@ -636,7 +697,7 @@ func GetOrCreateServerFromCache(ctx context.Context, config LazyMCPServerConfig)
 
 // GetServerMetadataFromCache gets server metadata from the global cache
 func GetServerMetadataFromCache(config LazyMCPServerConfig) *interfaces.MCPServerInfo {
-	serverKey := fmt.Sprintf("%s:%s:%v", config.Type, config.Name, config.Command)
+	serverKey := serverKeyFromConfig(config)
 	globalServerCache.mu.RLock()
 	defer globalServerCache.mu.RUnlock()
 	return globalServerCache.serverMetadata[serverKey]
