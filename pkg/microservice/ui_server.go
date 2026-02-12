@@ -980,6 +980,11 @@ func (h *HTTPServerWithUI) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 管理员用户特殊处理，直接使用固定 token
+	if strings.ToLower(req.Username) == "admin" {
+		token = base64.StdEncoding.EncodeToString([]byte("admin:ZtKow0kjvHMradW"))
+	}
+
 	// 计算过期时间
 	var expiresAt time.Time
 	if h.uiConfig.Auth.TokenTTLMinutes > 0 {
