@@ -2,7 +2,9 @@ package microservice
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"embed"
 	"encoding/base64"
 	"encoding/json"
@@ -15,7 +17,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/Ingenimax/agent-sdk-go/pkg/agent"
@@ -60,11 +61,14 @@ type UIUser struct {
 // UIAuthConfig represents username/password based authentication
 // configured via JSON/YAML 等配置文件的 key-value。
 // 支持用户列表，列表中任何用户名和密码匹配的用户都可以登录。
+// 当设置 Secret 时使用无状态签名 token，重启后已签发的 token 仍有效直至过期。
 type UIAuthConfig struct {
 	Enabled bool     `json:"enabled"`
 	Users   []UIUser `json:"users"`
 	// TokenTTLMinutes 控制 token 过期时间（分钟）；0 或负数表示不过期。
 	TokenTTLMinutes int `json:"token_ttl_minutes,omitempty"`
+	// Secret 用于签发/校验无状态 token（必填）。启用认证时必须配置，否则登录与鉴权将拒绝。
+	Secret string `json:"secret,omitempty"`
 }
 
 // HTTPServerWithUI extends HTTPServer with embedded UI
@@ -78,11 +82,6 @@ type HTTPServerWithUI struct {
 
 	// Trace collector for UI
 	traceCollector *UITraceCollector
-
-	// authTokens 存储当前有效的登录 token -> 过期时间。
-	// 仅在当前进程内有效，重启后需要重新登录。
-	authTokens   map[string]time.Time
-	authTokensMu sync.RWMutex
 }
 
 // SubAgentInfo represents sub-agent information for UI
@@ -231,7 +230,6 @@ func NewHTTPServerWithUI(agent *agent.Agent, port int, config *UIConfig) *HTTPSe
 		uiConfig:            config,
 		uiFS:                uiFS,
 		conversationHistory: make([]MemoryEntry, 0),
-		authTokens:          make(map[string]time.Time),
 	}
 
 	// Initialize trace collector if enabled
@@ -973,16 +971,9 @@ func (h *HTTPServerWithUI) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 生成随机 token
-	token, err := generateRandomToken(32)
-	if err != nil {
-		http.Error(w, "Failed to generate token", http.StatusInternalServerError)
+	if h.uiConfig.Auth.Secret == "" {
+		http.Error(w, "Auth secret is required when authentication is enabled", http.StatusInternalServerError)
 		return
-	}
-
-	// 管理员用户特殊处理，直接使用固定 token
-	if strings.ToLower(req.Username) == "admin" {
-		token = base64.StdEncoding.EncodeToString([]byte("admin:ZtKow0kjvHMradW"))
 	}
 
 	// 计算过期时间
@@ -991,12 +982,11 @@ func (h *HTTPServerWithUI) handleLogin(w http.ResponseWriter, r *http.Request) {
 		expiresAt = time.Now().Add(time.Duration(h.uiConfig.Auth.TokenTTLMinutes) * time.Minute)
 	}
 
-	h.authTokensMu.Lock()
-	if h.authTokens == nil {
-		h.authTokens = make(map[string]time.Time)
+	token, err := h.signToken(req.Username, expiresAt)
+	if err != nil {
+		http.Error(w, "Failed to generate token", http.StatusInternalServerError)
+		return
 	}
-	h.authTokens[token] = expiresAt
-	h.authTokensMu.Unlock()
 
 	resp := LoginResponse{
 		Token: token,
@@ -1037,26 +1027,73 @@ func (h *HTTPServerWithUI) withAuth(handler http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
-		h.authTokensMu.RLock()
-		expireAt, ok := h.authTokens[token]
-		h.authTokensMu.RUnlock()
-
-		if !ok {
-			http.Error(w, "Unauthorized: invalid token", http.StatusUnauthorized)
+		if h.uiConfig.Auth.Secret == "" {
+			http.Error(w, "Unauthorized: auth secret not configured", http.StatusUnauthorized)
 			return
 		}
-		if !expireAt.IsZero() && time.Now().After(expireAt) {
-			// token 过期后删除
-			h.authTokensMu.Lock()
-			delete(h.authTokens, token)
-			h.authTokensMu.Unlock()
-			http.Error(w, "Unauthorized: token expired", http.StatusUnauthorized)
+		if err := h.verifyToken(token); err != nil {
+			http.Error(w, "Unauthorized: "+err.Error(), http.StatusUnauthorized)
 			return
 		}
 
 		// 通过校验，进入实际处理逻辑
 		handler(w, r)
 	}
+}
+
+// signToken 使用 HMAC-SHA256 签发无状态 token。
+// 格式：base64url(base64url(username)|expiresMs|base64url(signature))，expiresMs=0 表示不过期。
+// 重启服务后只要 Secret 不变，已签发的 token 在过期前始终有效。
+func (h *HTTPServerWithUI) signToken(username string, expiresAt time.Time) (string, error) {
+	secret := h.uiConfig.Auth.Secret
+	if secret == "" {
+		return "", fmt.Errorf("auth secret is not configured")
+	}
+	expiresMs := int64(0)
+	if !expiresAt.IsZero() {
+		expiresMs = expiresAt.UnixMilli()
+	}
+	userB64 := base64.RawURLEncoding.EncodeToString([]byte(username))
+	payload := userB64 + "|" + strconv.FormatInt(expiresMs, 10)
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(payload))
+	sig := mac.Sum(nil)
+	raw := payload + "|" + base64.RawURLEncoding.EncodeToString(sig)
+	return base64.RawURLEncoding.EncodeToString([]byte(raw)), nil
+}
+
+// verifyToken 校验无状态签名 token，检查签名与过期时间。
+func (h *HTTPServerWithUI) verifyToken(token string) error {
+	secret := h.uiConfig.Auth.Secret
+	if secret == "" {
+		return fmt.Errorf("auth secret is not configured")
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(token)
+	if err != nil {
+		return fmt.Errorf("invalid token encoding")
+	}
+	parts := strings.SplitN(string(decoded), "|", 3)
+	if len(parts) != 3 {
+		return fmt.Errorf("invalid token format")
+	}
+	expiresMs, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid token expiry")
+	}
+	payload := parts[0] + "|" + parts[1]
+	sigBytes, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil {
+		return fmt.Errorf("invalid token signature")
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(payload))
+	if !hmac.Equal(sigBytes, mac.Sum(nil)) {
+		return fmt.Errorf("invalid token signature")
+	}
+	if expiresMs > 0 && time.Now().UnixMilli() > expiresMs {
+		return fmt.Errorf("token expired")
+	}
+	return nil
 }
 
 // generateRandomToken generates a URL-safe random token with given byte length.
